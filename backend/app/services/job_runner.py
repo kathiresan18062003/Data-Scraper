@@ -19,7 +19,7 @@ from backend.app.services import excel_service
 
 logger = logging.getLogger(__name__)
 
-MAX_CANDIDATES = 4
+MAX_CANDIDATES = 6
 MAX_SOURCES = 3
 
 
@@ -74,8 +74,8 @@ def process_single_row(
     on_stage: Callable[[str, str], None] = lambda s, u="": None,
     gemini_api_key: str | None = None,
 ) -> dict:
-    mpn = row["mpn"]
-    mfr = row["mfr"]
+    mpn = (row.get("primary_mpn") or row.get("mpn1") or row.get("mpn") or "").strip()
+    mfr = (row.get("mfr") or "Unknown").strip()
     google_url = excel_service.google_link(mfr, mpn)
 
     res = {
@@ -85,7 +85,7 @@ def process_single_row(
         "score": 0,
         "confidence": "REJECTED",
         "google": google_url,
-        "reason": "No candidate passed identity validation",
+        "reason": f"Not found: No product page discovered for {mfr} {mpn}",
         "product_title": row.get("title", ""),
         "overview": "",
         "features": [],
@@ -97,22 +97,24 @@ def process_single_row(
         "extraction_method": "deterministic",
     }
 
-    candidates_list = list(sd.candidates(row))
-    logger.info(f"Row MPN='{mpn}' MFR='{mfr}': found {len(candidates_list)} candidate(s).")
+    on_stage("Discover Sources", "")
+    candidates_list = list(sd.candidates(row, max_total=MAX_CANDIDATES))
+    logger.info(f"Row {row.get('row')}: MPN='{mpn}' MFR='{mfr}': found {len(candidates_list)} candidate(s).")
 
     all_fetched = []
     valids = []
+    rejected_candidates = []
     tried = 0
-    on_stage("Discover Sources", "")
 
     for tier, url in candidates_list:
-        if tried >= MAX_CANDIDATES or len(res["sources"]) >= MAX_SOURCES:
+        if tried >= MAX_CANDIDATES or len(valids) >= MAX_SOURCES:
             break
         tried += 1
 
         on_stage("Fetch Page", url)
         html = scraper.fetch(url, timeout, retries)
         if not html:
+            rejected_candidates.append(f"{url} (inaccessible / blocked / HTTP error)")
             continue
 
         on_stage("Extract Data", url)
@@ -127,37 +129,48 @@ def process_single_row(
                 parsed, extraction_method = gx.merge(parsed, gem_res)
 
         on_stage("Validate Product", url)
-        v = dv.validate(mpn, mfr, url, parsed, (), sd.mfr_domain(mfr))
+        v = dv.validate(mpn, mfr, url, parsed, preferred_domains=(), mfr_domain=sd.mfr_domain(mfr))
+
+        if v["is_valid"]:
+            valids.append((parsed, v, tier, url, extraction_method))
+            if url not in res["sources"] and len(res["sources"]) < MAX_SOURCES:
+                res["sources"].append(url)
+        else:
+            reason_txt = v.get("rejection_reason") or "; ".join(v.get("notes", []))
+            rejected_candidates.append(f"{url} ({reason_txt})")
 
         all_fetched.append((parsed, v, tier, url, extraction_method))
-        if v["is_valid"] and url not in res["sources"]:
-            res["sources"].append(url)
-            valids.append((parsed, v, tier, url, extraction_method))
 
     selected_candidate = None
     if valids:
         valids.sort(key=lambda x: -x[1]["score"])
         selected_candidate = valids[0]
-        res["sources"] = [x[3] for x in valids]
+        res["sources"] = [x[3] for x in valids[:MAX_SOURCES]]
     elif all_fetched:
+        # None passed strict threshold >= 35, check if any candidate was fetched
         all_fetched.sort(key=lambda x: -x[1]["score"])
         selected_candidate = all_fetched[0]
-        res["sources"] = [selected_candidate[3]]
+        if selected_candidate[1]["score"] > 0:
+            res["sources"] = [selected_candidate[3]]
 
     if selected_candidate:
         parsed, v, tier, url, extraction_method = selected_candidate
         parsed = dict(parsed, image_urls=list(parsed["image_urls"]))
 
+        # Cross-enrich missing fields from other verified pages
         pool = valids[1:] if valids else all_fetched[1:]
         for key in ("overview", "features", "specifications", "fitments", "image_urls"):
             if not parsed.get(key):
                 for p2, _, _, u2, _ in pool:
                     if p2.get(key):
                         parsed[key] = p2[key]
-                        v["notes"].append(f"{key} taken from {u2}")
+                        v["notes"].append(f"{key} enriched from {u2}")
                         break
 
-        missing = [k for k in ("overview", "features", "specifications", "image") if not parsed.get(k if k != "image" else "image_urls")]
+        missing = [
+            k for k in ("overview", "features", "specifications", "image")
+            if not parsed.get(k if k != "image" else "image_urls")
+        ]
         is_direct_url = bool((row.get("url") or "").strip().startswith("http"))
 
         if v["is_valid"] and not missing:
@@ -165,13 +178,20 @@ def process_single_row(
             reason = ""
         elif v["is_valid"] and missing:
             status = "REVIEW"
-            reason = "Missing: " + ", ".join(missing)
+            reason = "Source absent fields: " + ", ".join(missing)
         elif is_direct_url:
             status = "SUCCESS" if not missing else "REVIEW"
             reason = "" if not missing else "Missing: " + ", ".join(missing)
-        else:
+        elif v.get("is_variant"):
             status = "REVIEW"
+            reason = v.get("rejection_reason", "Variant mismatch detected")
+        else:
+            status = "REVIEW" if v["score"] >= 20 else "FAILED"
             reason = f"Candidate score {v['score']}/35: " + ", ".join(v.get("notes", []))
+
+        notes = list(v["notes"])
+        if rejected_candidates:
+            notes.append("Rejected candidates: " + "; ".join(rejected_candidates[:2]))
 
         res.update({
             "status": status,
@@ -184,13 +204,17 @@ def process_single_row(
             "specifications": parsed["specifications"],
             "fitments": parsed["fitments"],
             "image": (parsed["image_urls"] or [""])[0],
-            "notes": v["notes"],
+            "notes": notes,
             "missing": missing,
             "reason": reason,
             "extraction_method": extraction_method,
         })
     else:
-        res["reason"] = "Could not fetch target page or discovery candidates."
+        if rejected_candidates:
+            res["reason"] = "All candidates rejected: " + "; ".join(rejected_candidates[:2])
+            res["notes"] = rejected_candidates
+        else:
+            res["reason"] = f"Not found: No product page accessible for {mfr} {mpn}."
 
     return res
 
@@ -208,8 +232,8 @@ def _get_step_lock(job_id: str) -> threading.Lock:
 
 def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
     """
-    Executes one row of work for the job synchronously.
-    Returns True if a row was processed, False if the job is finished, paused, or cancelled.
+    Executes one row of work for the job synchronously with atomic JSON checkpointing
+    and live Excel output persistence.
     """
     controller = get_controller(job_id)
     if controller.is_paused() or controller.is_cancelled():
@@ -230,6 +254,10 @@ def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
         src_path = Path(job.file_path)
         sheet_name = job.sheet_name
         limit = cfg.get("limit")
+        start_row = cfg.get("start_row")
+        end_row = cfg.get("end_row")
+        sno_start = cfg.get("sno_start")
+        sno_end = cfg.get("sno_end")
         timeout = cfg.get("timeout", 20)
         retries = cfg.get("retries", 2)
         use_gemini = cfg.get("use_gemini", True)
@@ -241,7 +269,15 @@ def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
         import openpyxl
         wb = openpyxl.load_workbook(src_path, data_only=True)
         ws = wb[sheet_name]
-        rows = excel_service.read_rows(ws, cmap, limit=limit)
+        rows = excel_service.read_rows(
+            ws,
+            cmap,
+            limit=limit,
+            start_row=start_row,
+            end_row=end_row,
+            sno_start=sno_start,
+            sno_end=sno_end,
+        )
         wb.close()
 
         if not rows:
@@ -255,15 +291,60 @@ def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
             job.status = "RUNNING"
             db.commit()
 
+        # Load recovery checkpoint if exists
+        cp_data = excel_service.load_checkpoint(job_id) or {
+            "job_id": job_id,
+            "saved_rows": {},
+            "total_products": len(rows),
+        }
+        saved_rows_dict: dict = cp_data.get("saved_rows", {})
+
         existing_results = {
             r.row_index: r for r in db.query(ProductResult).filter(ProductResult.job_id == job_id).all()
         }
 
+        # Reconcile checkpoint with DB on start/resume
+        for str_r, saved_item in saved_rows_dict.items():
+            r_idx = int(str_r)
+            if r_idx not in existing_results:
+                reconstructed = ProductResult(
+                    job_id=job_id,
+                    row_index=r_idx,
+                    mpn=saved_item.get("mpn", ""),
+                    manufacturer=saved_item.get("mfr", ""),
+                    title=saved_item.get("title", ""),
+                    product_name=saved_item.get("product_title", ""),
+                    status=saved_item.get("status", "FAILED"),
+                    confidence=saved_item.get("confidence", "REJECTED"),
+                    tier=saved_item.get("tier", "MANUAL REVIEW"),
+                    score=saved_item.get("score", 0),
+                    image_url=saved_item.get("image", ""),
+                    image_urls=json.dumps([saved_item.get("image")] if saved_item.get("image") else []),
+                    source_url=saved_item.get("sources", [""])[0] if saved_item.get("sources") else "",
+                    source_urls=json.dumps(saved_item.get("sources", [])),
+                    data_source_urls=json.dumps(saved_item.get("sources", [])),
+                    overview=saved_item.get("overview", ""),
+                    features=json.dumps(saved_item.get("features", [])),
+                    specifications=json.dumps(saved_item.get("specifications", [])),
+                    fitments=json.dumps(saved_item.get("fitments", [])),
+                    missing_fields=json.dumps(saved_item.get("missing", [])),
+                    validation_notes=json.dumps(saved_item.get("notes", [])),
+                    rework_reason=saved_item.get("reason", ""),
+                    google_search_url=saved_item.get("google", ""),
+                    extraction_method=saved_item.get("extraction_method", "deterministic"),
+                )
+                db.add(reconstructed)
+                existing_results[r_idx] = reconstructed
+
+        # Identify next pending row
         target_row = None
         target_index = -1
         for idx, row in enumerate(rows):
             row_idx = row["row"]
-            if row_idx not in existing_results:
+            is_saved_in_cp = str(row_idx) in saved_rows_dict
+            is_in_db = row_idx in existing_results
+
+            if not is_saved_in_cp or not is_in_db:
                 target_row = row
                 target_index = idx
                 break
@@ -329,6 +410,7 @@ def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
         add_log(f"Row {row_idx} ({target_index+1}/{len(rows)}): {row['mfr']} {row['mpn']}")
         db.commit()
 
+        # Execute extraction and verification
         try:
             res = process_single_row(
                 row,
@@ -345,7 +427,7 @@ def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
                 "score": 0,
                 "confidence": "REJECTED",
                 "google": excel_service.google_link(row["mfr"], row["mpn"]),
-                "reason": f"Processing error: {str(e)}",
+                "reason": f"Processing exception: {str(e)}",
                 "product_title": row.get("title", ""),
                 "overview": "",
                 "features": [],
@@ -357,13 +439,34 @@ def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
                 "extraction_method": "deterministic",
             }
 
+        # 1. Save immediately to JSON checkpoint
+        saved_rows_dict[str(row_idx)] = dict(res, mpn=row["mpn"], mfr=row["mfr"], title=row.get("title", ""))
+        cp_data["saved_rows"] = saved_rows_dict
+        cp_data["total_products"] = len(rows)
+        cp_data["processed_products"] = len(saved_rows_dict)
+        cp_data["last_saved_at"] = datetime.now(timezone.utc).isoformat()
+        excel_service.save_checkpoint(job_id, cp_data)
+
+        # 2. Live Excel writing (incremental write after each row)
+        export_results = {
+            int(k): v for k, v in saved_rows_dict.items()
+        }
+        try:
+            excel_paths = excel_service.export_all(src_path, sheet_name, rows, export_results, job_id=job_id)
+            job.output_scraped_path = str(excel_paths["scraped"])
+            job.output_organized_path = str(excel_paths["organized"])
+            job.output_review_path = str(excel_paths["review"])
+        except Exception as e:
+            logger.warning(f"Incremental Excel save encountered write delay: {e}")
+
+        # 3. Update database record only after file save succeeded
         db_res = existing_results.get(row_idx)
         if not db_res:
             db_res = ProductResult(
                 job_id=job_id,
                 row_index=row_idx,
                 mpn=row["mpn"],
-                manufacturer=row["mfr"]
+                manufacturer=row["mfr"],
             )
             db.add(db_res)
             existing_results[row_idx] = db_res
@@ -398,34 +501,6 @@ def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
         job.failed_products = sum(1 for r in all_res if r.status == "FAILED")
 
         add_log(f"-> {res['status']} ({res.get('tier')}) {res.get('reason', '')}")
-
-        export_results = {
-            r.row_index: {
-                "status": r.status,
-                "confidence": r.confidence,
-                "tier": r.tier,
-                "score": r.score,
-                "product_title": r.product_name or r.title,
-                "overview": r.overview,
-                "features": json.loads(r.features or "[]"),
-                "specifications": json.loads(r.specifications or "[]"),
-                "fitments": json.loads(r.fitments or "[]"),
-                "image": r.image_url,
-                "sources": json.loads(r.source_urls or "[]"),
-                "notes": json.loads(r.validation_notes or "[]"),
-                "reason": r.rework_reason,
-                "google": r.google_search_url,
-            }
-            for r in existing_results.values()
-        }
-        try:
-            excel_paths = excel_service.export_all(src_path, sheet_name, rows, export_results, job_id=job_id)
-            job.output_scraped_path = str(excel_paths["scraped"])
-            job.output_organized_path = str(excel_paths["organized"])
-            job.output_review_path = str(excel_paths["review"])
-        except Exception as e:
-            logger.warning(f"Incremental export failed: {e}")
-
         db.commit()
         return True
 

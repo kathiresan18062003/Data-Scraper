@@ -66,10 +66,14 @@ export interface SheetInfo {
   row_count: number;
   column_count: number;
   detected_columns: {
+    sno?: string | null;
+    mpn1?: string | null;
     mpn?: string | null;
     mfr?: string | null;
     title?: string | null;
+    upc?: string | null;
     url?: string | null;
+    [key: string]: string | null | undefined;
   };
   headers: string[];
   preview_rows: (string | number)[][];
@@ -86,6 +90,10 @@ export interface JobStartRequest {
   sheet_name: string;
   column_mapping: Record<string, string>;
   limit?: number | null;
+  start_row?: number | null;
+  end_row?: number | null;
+  sno_start?: number | null;
+  sno_end?: number | null;
   timeout: number;
   retries: number;
   use_gemini: boolean;

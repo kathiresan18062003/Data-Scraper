@@ -193,7 +193,15 @@ def create_and_start_job(req: JobStartRequest, db: Session = Depends(get_db)):
     try:
         wb = openpyxl.load_workbook(file_path, data_only=True)
         ws = wb[req.sheet_name]
-        rows = excel_service.read_rows(ws, req.column_mapping, limit=req.limit)
+        rows = excel_service.read_rows(
+            ws,
+            req.column_mapping,
+            limit=req.limit,
+            start_row=req.start_row,
+            end_row=req.end_row,
+            sno_start=req.sno_start,
+            sno_end=req.sno_end,
+        )
         wb.close()
         total_products = len(rows)
         excel_paths = excel_service.export_all(file_path, req.sheet_name, rows, {}, job_id=job_id)
@@ -224,6 +232,10 @@ def create_and_start_job(req: JobStartRequest, db: Session = Depends(get_db)):
         column_mapping=json.dumps(req.column_mapping),
         config=json.dumps({
             "limit": req.limit,
+            "start_row": req.start_row,
+            "end_row": req.end_row,
+            "sno_start": req.sno_start,
+            "sno_end": req.sno_end,
             "timeout": req.timeout,
             "retries": req.retries,
             "use_gemini": req.use_gemini,

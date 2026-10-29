@@ -100,6 +100,66 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({ selectedJobId, onSelec
         />
       )}
 
+      {/* Field Completion Rates */}
+      {results.length > 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+          <span className="text-xs font-bold uppercase tracking-wider text-slate-700 block mb-3">
+            Dataset Field-Completion Rates (Loaded Sample)
+          </span>
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
+            <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+              <span className="text-slate-500 block text-[11px]">Product Images</span>
+              <span className="font-bold text-slate-800 text-sm">
+                {Math.round((results.filter((r) => Boolean(r.image_url)).length / results.length) * 100)}%
+              </span>
+              <span className="text-[10px] text-slate-400 block mt-0.5">
+                {results.filter((r) => Boolean(r.image_url)).length}/{results.length} items
+              </span>
+            </div>
+
+            <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+              <span className="text-slate-500 block text-[11px]">Overview Description</span>
+              <span className="font-bold text-slate-800 text-sm">
+                {Math.round((results.filter((r) => Boolean(r.overview)).length / results.length) * 100)}%
+              </span>
+              <span className="text-[10px] text-slate-400 block mt-0.5">
+                {results.filter((r) => Boolean(r.overview)).length}/{results.length} items
+              </span>
+            </div>
+
+            <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+              <span className="text-slate-500 block text-[11px]">Specifications Table</span>
+              <span className="font-bold text-slate-800 text-sm">
+                {Math.round((results.filter((r) => r.specifications && r.specifications.length > 0).length / results.length) * 100)}%
+              </span>
+              <span className="text-[10px] text-slate-400 block mt-0.5">
+                {results.filter((r) => r.specifications && r.specifications.length > 0).length}/{results.length} items
+              </span>
+            </div>
+
+            <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+              <span className="text-slate-500 block text-[11px]">Features Bullets</span>
+              <span className="font-bold text-slate-800 text-sm">
+                {Math.round((results.filter((r) => r.features && r.features.length > 0).length / results.length) * 100)}%
+              </span>
+              <span className="text-[10px] text-slate-400 block mt-0.5">
+                {results.filter((r) => r.features && r.features.length > 0).length}/{results.length} items
+              </span>
+            </div>
+
+            <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200">
+              <span className="text-slate-500 block text-[11px]">Fitments / Vehicle</span>
+              <span className="font-bold text-slate-800 text-sm">
+                {Math.round((results.filter((r) => r.fitments && r.fitments.length > 0).length / results.length) * 100)}%
+              </span>
+              <span className="text-[10px] text-slate-400 block mt-0.5">
+                {results.filter((r) => r.fitments && r.fitments.length > 0).length}/{results.length} items
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Download Reports Bar */}
       {selectedJobId && (
         <div>

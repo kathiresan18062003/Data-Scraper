@@ -27,6 +27,10 @@ class JobStartRequest(BaseModel):
     sheet_name: str
     column_mapping: dict[str, str]
     limit: Optional[int] = Field(default=None, description="Max products to scrape")
+    start_row: Optional[int] = Field(default=None, description="Optional start row index (1-based)")
+    end_row: Optional[int] = Field(default=None, description="Optional end row index (1-based)")
+    sno_start: Optional[int] = Field(default=None, description="Optional start S.No")
+    sno_end: Optional[int] = Field(default=None, description="Optional end S.No")
     timeout: int = Field(default=20, ge=5, le=120)
     retries: int = Field(default=2, ge=0, le=5)
     use_gemini: bool = Field(default=True)

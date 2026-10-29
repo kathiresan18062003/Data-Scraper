@@ -1,5 +1,16 @@
 import React, { useState } from 'react';
-import { UploadCloud, FileSpreadsheet, Check, AlertCircle, ArrowRight, Play, Settings2, Sparkles } from 'lucide-react';
+import {
+  UploadCloud,
+  FileSpreadsheet,
+  Check,
+  AlertCircle,
+  ArrowRight,
+  Play,
+  Settings2,
+  Sparkles,
+  Layers,
+  Filter,
+} from 'lucide-react';
 import { api } from '../services/api';
 import { SheetInfo, UploadResponse } from '../types';
 
@@ -16,15 +27,23 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
 
   // Column mapping state
   const [colMapping, setColMapping] = useState<{
+    sno: string;
+    mpn1: string;
     mpn: string;
     mfr: string;
     title: string;
+    upc: string;
     url: string;
-  }>({ mpn: '', mfr: '', title: '', url: '' });
+  }>({ sno: '', mpn1: '', mpn: '', mfr: '', title: '', upc: '', url: '' });
+
+  // Processing scope & range state
+  const [processScope, setProcessScope] = useState<'all' | 'range'>('all');
+  const [rangeMode, setRangeMode] = useState<'sno' | 'row'>('sno');
+  const [rangeStart, setRangeStart] = useState<string>('1');
+  const [rangeEnd, setRangeEnd] = useState<string>('50');
 
   // Job config state
-  const [processAll, setProcessAll] = useState(true);
-  const [limit, setLimit] = useState(100);
+  const [limit, setLimit] = useState<number | ''>('');
   const [timeout, setTimeoutVal] = useState(() => Number(localStorage.getItem('scraper_timeout') || 20));
   const [retries, setRetries] = useState(() => Number(localStorage.getItem('scraper_retries') || 2));
   const [geminiKeyInput, setGeminiKeyInput] = useState(() => localStorage.getItem('gemini_api_key') || '');
@@ -37,26 +56,32 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const autoMapSheet = (sheet: SheetInfo) => {
+    const det = sheet.detected_columns;
+    setColMapping({
+      sno: det.sno || '',
+      mpn1: det.mpn1 || '',
+      mpn: det.mpn || sheet.headers[0] || '',
+      mfr: det.mfr || sheet.headers[1] || '',
+      title: det.title || '',
+      upc: det.upc || '',
+      url: det.url || '',
+    });
+  };
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const selectedFile = e.target.files[0];
       setFile(selectedFile);
       setError(null);
 
-      // Auto upload on select
       setUploading(true);
       try {
         const resp = await api.uploadFile(selectedFile);
         setUploadData(resp);
         if (resp.sheets && resp.sheets.length > 0) {
-          const firstSheet = resp.sheets[0];
           setSelectedSheetIndex(0);
-          setColMapping({
-            mpn: firstSheet.detected_columns.mpn || firstSheet.headers[0] || '',
-            mfr: firstSheet.detected_columns.mfr || firstSheet.headers[1] || '',
-            title: firstSheet.detected_columns.title || '',
-            url: firstSheet.detected_columns.url || '',
-          });
+          autoMapSheet(resp.sheets[0]);
         }
       } catch (err: any) {
         setError(err.message || 'Failed to upload workbook');
@@ -69,13 +94,7 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
   const handleSheetChange = (idx: number) => {
     setSelectedSheetIndex(idx);
     if (uploadData?.sheets[idx]) {
-      const sh = uploadData.sheets[idx];
-      setColMapping({
-        mpn: sh.detected_columns.mpn || sh.headers[0] || '',
-        mfr: sh.detected_columns.mfr || sh.headers[1] || '',
-        title: sh.detected_columns.title || '',
-        url: sh.detected_columns.url || '',
-      });
+      autoMapSheet(uploadData.sheets[idx]);
     }
   };
 
@@ -87,8 +106,8 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
       return;
     }
 
-    if (!colMapping.mpn || !colMapping.mfr) {
-      setError('Both MPN and Manufacturer columns must be mapped.');
+    if (!colMapping.mpn1 && !colMapping.mpn) {
+      setError('Please map either the MPN1 (primary) or MPN column to identify products.');
       return;
     }
 
@@ -100,18 +119,32 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
         localStorage.setItem('gemini_api_key', geminiKeyInput.trim());
       }
 
-      const newJob = await api.createJob({
+      // Build request payload
+      const requestPayload: any = {
         file_token: uploadData.file_token,
         sheet_name: currentSheet.name,
         column_mapping: colMapping,
-        limit: processAll ? null : Number(limit),
+        limit: limit !== '' ? Number(limit) : null,
         timeout: Number(timeout),
         retries: Number(retries),
         use_gemini: Boolean(useGemini),
-        save_every: periodicSave ? Number(saveEvery) : 0,
+        save_every: periodicSave ? Number(saveEvery) : 1,
         gemini_api_key: geminiKeyInput.trim() || undefined,
-      });
+      };
 
+      if (processScope === 'range') {
+        const startVal = parseInt(rangeStart, 10);
+        const endVal = parseInt(rangeEnd, 10);
+        if (rangeMode === 'sno') {
+          if (!isNaN(startVal)) requestPayload.sno_start = startVal;
+          if (!isNaN(endVal)) requestPayload.sno_end = endVal;
+        } else {
+          if (!isNaN(startVal)) requestPayload.start_row = startVal;
+          if (!isNaN(endVal)) requestPayload.end_row = endVal;
+        }
+      }
+
+      const newJob = await api.createJob(requestPayload);
       onJobStarted(newJob.id);
     } catch (err: any) {
       setError(err.message || 'Failed to start scraping job');
@@ -124,7 +157,7 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
       <div>
         <h1 className="text-2xl font-bold text-slate-900">Upload & Configure Scraping Job</h1>
         <p className="text-sm text-slate-500 mt-1">
-          Upload your product catalog workbook (.xlsx), map columns, and execute automated multi-source enrichment.
+          Upload your product catalog workbook (.xlsx), map identifiers (MPN1, MPN, Brand, UPC), configure S.No ranges, and execute automated multi-source enrichment.
         </p>
       </div>
 
@@ -154,12 +187,13 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
             {file ? file.name : 'Click or drag and drop your Excel workbook here'}
           </p>
           <p className="text-xs text-slate-500 mt-1">
-            Supports .xlsx and .xlsm files up to 50MB
+            Supports .xlsx and .xlsm files up to 50MB (preserves original sheets, order & formatting)
           </p>
+
           {uploading && (
             <div className="mt-4 flex items-center justify-center space-x-2 text-xs text-blue-600 font-semibold">
               <div className="animate-spin w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full" />
-              <span>Analyzing workbook structure and columns...</span>
+              <span>Analyzing workbook structure, headers, and rows...</span>
             </div>
           )}
         </div>
@@ -170,12 +204,12 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
         <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm space-y-6">
           <h2 className="text-sm font-bold uppercase tracking-wider text-slate-700 flex items-center space-x-2">
             <span className="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs">2</span>
-            <span>Worksheet Selection & Preview</span>
+            <span>Worksheet Selection & 10-Row Preview</span>
           </h2>
 
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
             <div className="w-full sm:w-72">
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Select Worksheet</label>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Select Target Worksheet</label>
               <select
                 value={selectedSheetIndex}
                 onChange={(e) => handleSheetChange(Number(e.target.value))}
@@ -230,19 +264,39 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
         <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm space-y-6">
           <h2 className="text-sm font-bold uppercase tracking-wider text-slate-700 flex items-center space-x-2">
             <span className="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs">3</span>
-            <span>Column Mapping</span>
+            <span>Product Identifier & Column Mapping</span>
           </h2>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {/* MPN Column */}
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">
+            {/* MPN1 (Primary Identifier) */}
+            <div className="p-3 bg-blue-50/40 rounded-lg border border-blue-200/60">
+              <label className="block text-xs font-bold text-slate-800 mb-1">
+                MPN1 (Primary Identifier) <span className="text-blue-600 font-normal text-[11px]">(Recommended)</span>
+              </label>
+              <select
+                value={colMapping.mpn1}
+                onChange={(e) => setColMapping({ ...colMapping, mpn1: e.target.value })}
+                className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-xs font-medium focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">-- None (use MPN) --</option>
+                {currentSheet.headers.map((h) => (
+                  <option key={h} value={h}>
+                    {h}
+                  </option>
+                ))}
+              </select>
+              <span className="text-[11px] text-slate-500 mt-1 block">Primary model number for search</span>
+            </div>
+
+            {/* MPN (Secondary Identifier) */}
+            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+              <label className="block text-xs font-bold text-slate-800 mb-1">
                 MPN / Part Number <span className="text-rose-500">*</span>
               </label>
               <select
                 value={colMapping.mpn}
                 onChange={(e) => setColMapping({ ...colMapping, mpn: e.target.value })}
-                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:ring-2 focus:ring-blue-500"
+                className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-xs font-medium focus:ring-2 focus:ring-blue-500"
               >
                 <option value="">-- Select Column --</option>
                 {currentSheet.headers.map((h) => (
@@ -251,18 +305,18 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
                   </option>
                 ))}
               </select>
-              <span className="text-[11px] text-slate-400 mt-0.5 block">Primary identifier</span>
+              <span className="text-[11px] text-slate-500 mt-1 block">Base part / SKU number</span>
             </div>
 
-            {/* Manufacturer Column */}
-            <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">
+            {/* Manufacturer / Brand */}
+            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+              <label className="block text-xs font-bold text-slate-800 mb-1">
                 Manufacturer / Brand <span className="text-rose-500">*</span>
               </label>
               <select
                 value={colMapping.mfr}
                 onChange={(e) => setColMapping({ ...colMapping, mfr: e.target.value })}
-                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:ring-2 focus:ring-blue-500"
+                className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-xs font-medium focus:ring-2 focus:ring-blue-500"
               >
                 <option value="">-- Select Column --</option>
                 {currentSheet.headers.map((h) => (
@@ -271,18 +325,38 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
                   </option>
                 ))}
               </select>
-              <span className="text-[11px] text-slate-400 mt-0.5 block">Brand verification</span>
+              <span className="text-[11px] text-slate-500 mt-1 block">Brand identity verification</span>
+            </div>
+
+            {/* S.No / Serial Number */}
+            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+              <label className="block text-xs font-semibold text-slate-800 mb-1">
+                S.No / Serial No (Optional)
+              </label>
+              <select
+                value={colMapping.sno}
+                onChange={(e) => setColMapping({ ...colMapping, sno: e.target.value })}
+                className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-xs font-medium focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">-- Auto-generate from row --</option>
+                {currentSheet.headers.map((h) => (
+                  <option key={h} value={h}>
+                    {h}
+                  </option>
+                ))}
+              </select>
+              <span className="text-[11px] text-slate-500 mt-1 block">Stable product identifier</span>
             </div>
 
             {/* Product Title Column */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Existing Title (Optional)
+            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+              <label className="block text-xs font-semibold text-slate-800 mb-1">
+                Product Title (Optional)
               </label>
               <select
                 value={colMapping.title}
                 onChange={(e) => setColMapping({ ...colMapping, title: e.target.value })}
-                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:ring-2 focus:ring-blue-500"
+                className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-xs font-medium focus:ring-2 focus:ring-blue-500"
               >
                 <option value="">-- None --</option>
                 {currentSheet.headers.map((h) => (
@@ -291,18 +365,38 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
                   </option>
                 ))}
               </select>
-              <span className="text-[11px] text-slate-400 mt-0.5 block">Fallback title</span>
+              <span className="text-[11px] text-slate-500 mt-1 block">Catalog title fallback</span>
             </div>
 
-            {/* Existing URL Column */}
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Existing URL (Optional)
+            {/* UPC / Barcode */}
+            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+              <label className="block text-xs font-semibold text-slate-800 mb-1">
+                UPC / Barcode (Optional)
+              </label>
+              <select
+                value={colMapping.upc}
+                onChange={(e) => setColMapping({ ...colMapping, upc: e.target.value })}
+                className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-xs font-medium focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">-- None --</option>
+                {currentSheet.headers.map((h) => (
+                  <option key={h} value={h}>
+                    {h}
+                  </option>
+                ))}
+              </select>
+              <span className="text-[11px] text-slate-500 mt-1 block">Barcode matching</span>
+            </div>
+
+            {/* Existing Source URL */}
+            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200">
+              <label className="block text-xs font-semibold text-slate-800 mb-1">
+                Direct Source URL (Optional)
               </label>
               <select
                 value={colMapping.url}
                 onChange={(e) => setColMapping({ ...colMapping, url: e.target.value })}
-                className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-xs font-medium focus:ring-2 focus:ring-blue-500"
+                className="w-full px-2.5 py-1.5 bg-white border border-slate-300 rounded text-xs font-medium focus:ring-2 focus:ring-blue-500"
               >
                 <option value="">-- None --</option>
                 {currentSheet.headers.map((h) => (
@@ -311,46 +405,97 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
                   </option>
                 ))}
               </select>
-              <span className="text-[11px] text-slate-400 mt-0.5 block">Prioritized candidate</span>
+              <span className="text-[11px] text-slate-500 mt-1 block">Prioritized candidate URL</span>
             </div>
           </div>
         </div>
       )}
 
-      {/* Step 4: Scraping Configuration */}
+      {/* Step 4: Scraping Scope & Execution Settings */}
       {uploadData && currentSheet && (
         <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm space-y-6">
           <h2 className="text-sm font-bold uppercase tracking-wider text-slate-700 flex items-center space-x-2">
             <span className="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs">4</span>
-            <span>Scraping Execution Settings</span>
+            <span>Batch Scope & Execution Settings</span>
           </h2>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-            {/* Process Limit */}
-            <div>
-              <label className="flex items-center space-x-2 cursor-pointer mb-2">
+          {/* Processing Scope Selector */}
+          <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 space-y-3">
+            <span className="text-xs font-bold text-slate-800 block">Processing Range & Selection:</span>
+            <div className="flex flex-wrap items-center gap-6 text-xs">
+              <label className="flex items-center space-x-2 cursor-pointer font-semibold text-slate-700">
                 <input
-                  type="checkbox"
-                  checked={processAll}
-                  onChange={(e) => setProcessAll(e.target.checked)}
-                  className="rounded text-blue-600 focus:ring-blue-500 h-4 w-4"
+                  type="radio"
+                  name="processScope"
+                  checked={processScope === 'all'}
+                  onChange={() => setProcessScope('all')}
+                  className="text-blue-600 focus:ring-blue-500"
                 />
-                <span className="text-xs font-bold text-slate-800">Process until end of file</span>
+                <span>Process All Products ({currentSheet.row_count} total)</span>
               </label>
 
-              {!processAll && (
-                <div>
-                  <label className="block text-[11px] text-slate-500 mb-1">Max products limit</label>
+              <label className="flex items-center space-x-2 cursor-pointer font-semibold text-slate-700">
+                <input
+                  type="radio"
+                  name="processScope"
+                  checked={processScope === 'range'}
+                  onChange={() => setProcessScope('range')}
+                  className="text-blue-600 focus:ring-blue-500"
+                />
+                <span>Specific Range Selection</span>
+              </label>
+            </div>
+
+            {processScope === 'range' && (
+              <div className="pt-2 flex flex-wrap items-center gap-4 text-xs">
+                <div className="flex items-center space-x-2">
+                  <span className="text-slate-600 font-medium">Filter by:</span>
+                  <select
+                    value={rangeMode}
+                    onChange={(e: any) => setRangeMode(e.target.value)}
+                    className="px-2.5 py-1 border border-slate-300 rounded bg-white text-xs font-semibold"
+                  >
+                    <option value="sno">S.No</option>
+                    <option value="row">Row Number</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center space-x-2">
+                  <span className="text-slate-600">From:</span>
                   <input
                     type="number"
                     min={1}
-                    max={currentSheet.row_count}
-                    value={limit}
-                    onChange={(e) => setLimit(Number(e.target.value))}
-                    className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
+                    value={rangeStart}
+                    onChange={(e) => setRangeStart(e.target.value)}
+                    className="w-20 px-2.5 py-1 border border-slate-300 rounded text-xs text-center"
+                  />
+                  <span className="text-slate-600">To:</span>
+                  <input
+                    type="number"
+                    min={1}
+                    value={rangeEnd}
+                    onChange={(e) => setRangeEnd(e.target.value)}
+                    className="w-20 px-2.5 py-1 border border-slate-300 rounded text-xs text-center"
                   />
                 </div>
-              )}
+              </div>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            {/* Batch Limit Cap */}
+            <div>
+              <label className="block text-xs font-bold text-slate-800 mb-1">Max Products Limit (Optional)</label>
+              <input
+                type="number"
+                min={1}
+                max={currentSheet.row_count}
+                placeholder={`All (${currentSheet.row_count})`}
+                value={limit}
+                onChange={(e) => setLimit(e.target.value ? Number(e.target.value) : '')}
+                className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
+              />
+              <span className="text-[11px] text-slate-400 mt-0.5 block">Leave empty to process all</span>
             </div>
 
             {/* Timeout */}
@@ -369,7 +514,7 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
 
             {/* Retries */}
             <div>
-              <label className="block text-xs font-bold text-slate-800 mb-1">Max Retries</label>
+              <label className="block text-xs font-bold text-slate-800 mb-1">Max Retries per Site</label>
               <input
                 type="number"
                 min={0}
@@ -378,7 +523,7 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
                 onChange={(e) => setRetries(Number(e.target.value))}
                 className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs"
               />
-              <span className="text-[11px] text-slate-400 mt-0.5 block">Retry per site attempt</span>
+              <span className="text-[11px] text-slate-400 mt-0.5 block">Retry per attempt</span>
             </div>
 
             {/* AI Toggle */}
@@ -432,7 +577,7 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
                     }}
                     className="w-full px-2 py-1 text-xs border border-purple-300 rounded font-mono"
                   />
-                  <span className="text-[10px] text-purple-600 block">Key will be saved and used for this scrape</span>
+                  <span className="text-[10px] text-purple-600 block">Key stored in browser for this scrape</span>
                 </div>
               )}
             </div>
@@ -448,8 +593,8 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
                 className="rounded text-blue-600 focus:ring-blue-500 h-4 w-4"
               />
               <div>
-                <span className="text-xs font-bold text-slate-800 block">Simultaneous Incremental Excel Saving</span>
-                <span className="text-[11px] text-slate-500">Safely updates output files as products are processed</span>
+                <span className="text-xs font-bold text-slate-800 block">Simultaneous Live Excel & Checkpoint Saving</span>
+                <span className="text-[11px] text-slate-500">Atomically writes outputs and updates progress after every product</span>
               </div>
             </label>
 
@@ -487,7 +632,7 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
             ) : (
               <>
                 <Play className="w-4 h-4" />
-                <span>Start Scraping (Auto-Run to End)</span>
+                <span>Start Scraping (Live Auto-Save)</span>
                 <ArrowRight className="w-4 h-4" />
               </>
             )}
@@ -497,4 +642,3 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
     </div>
   );
 };
-
