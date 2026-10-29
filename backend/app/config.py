@@ -1,0 +1,57 @@
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Project root directory: product_data_scraper_dashboard
+ROOT = Path(__file__).resolve().parent.parent.parent
+
+# Load .env file
+load_dotenv(ROOT / ".env")
+
+# Directories
+DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT / "data")))
+UPLOAD_DIR = DATA_DIR / "uploads"
+OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(ROOT / "output")))
+CACHE_DIR = ROOT / ".cache"
+
+for _d in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR, CACHE_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
+
+# Database
+DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATA_DIR / 'scraper.db'}")
+
+# Scraping & AI settings
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "20"))
+DOMAIN_DELAY = float(os.getenv("DOMAIN_DELAY", "1.5"))
+VALID_SCORE = int(os.getenv("VALID_SCORE", "35"))
+
+# CORS settings
+FRONTEND_ORIGIN = os.getenv(
+    "FRONTEND_ORIGIN",
+    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000,http://127.0.0.1:3000"
+)
+
+# Known domain rules & line codes
+MANUFACTURER_DOMAINS = {
+    "wilwood": "wilwood.com",
+    "moroso": "moroso.com",
+    "let's go aero": "letsgoaero.com",
+    "mopar": "mopar.com"
+}
+LINE_CODES = {
+    "WLD": "Wilwood",
+    "MOR": "Moroso",
+    "MEC": "Marshall Excelsior",
+    "LGA": "Let's Go Aero"
+}
+
+
+def is_gemini_available() -> bool:
+    return bool(GEMINI_API_KEY and GEMINI_API_KEY.strip())
+
+
+def get_cors_origins() -> list[str]:
+    return [orig.strip() for orig in FRONTEND_ORIGIN.split(",") if orig.strip()]
+
