@@ -9,4 +9,7 @@ if str(root_dir) not in sys.path:
 
 from backend.app.main import app
 
-__all__ = ["app"]
+# Export both app and handler for universal Vercel Python runtime compatibility
+handler = app
+
+__all__ = ["app", "handler"]

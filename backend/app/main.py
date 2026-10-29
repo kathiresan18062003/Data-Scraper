@@ -12,8 +12,11 @@ from backend.app.database import init_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Initialize SQLite database and tables
-    init_db()
+    # Initialize SQLite database and tables safely
+    try:
+        init_db()
+    except Exception as exc:
+        pass
     yield
 
 
@@ -21,6 +24,9 @@ app = FastAPI(
     title="Product Data Scraper Dashboard API",
     description="FastAPI Backend for Product Data Scraper with SQLite, incremental Excel saving, and Gemini extraction.",
     version="2.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
     lifespan=lifespan,
 )
 
@@ -50,7 +56,19 @@ def root():
     if index_file.exists():
         return FileResponse(index_file)
     return {
-        "message": "Product Data Scraper Dashboard API is running.",
+        "status": "online",
+        "service": "Product Data Scraper Dashboard API",
+        "docs_url": "/docs",
+        "health_url": "/api/health",
+        "dashboard_url": "/api/dashboard",
+    }
+
+
+@app.get("/api")
+def api_root():
+    return {
+        "status": "online",
+        "service": "Product Data Scraper Dashboard API",
         "docs_url": "/docs",
         "health_url": "/api/health",
         "dashboard_url": "/api/dashboard",

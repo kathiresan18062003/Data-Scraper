@@ -9,7 +9,18 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(ROOT / ".env")
 
 # Detect Vercel serverless environment (read-only filesystem except /tmp)
-IS_VERCEL = bool(os.getenv("VERCEL"))
+def _detect_serverless() -> bool:
+    if os.getenv("VERCEL") or os.getenv("VERCEL_ENV") or os.getenv("AWS_LAMBDA_FUNCTION_NAME") or os.getenv("LAMBDA_TASK_ROOT"):
+        return True
+    try:
+        test_file = ROOT / ".probe_write"
+        test_file.touch()
+        test_file.unlink()
+        return False
+    except Exception:
+        return True
+
+IS_VERCEL = _detect_serverless()
 
 # Directories
 if IS_VERCEL:
