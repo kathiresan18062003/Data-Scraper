@@ -44,7 +44,22 @@ for _d in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR, CACHE_DIR):
 if IS_VERCEL:
     DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////tmp/scraper.db")
 else:
-    DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATA_DIR / 'scraper.db'}")
+    env_db = os.getenv("DATABASE_URL", "")
+    if env_db and env_db.startswith("sqlite:///"):
+        raw_path = env_db[len("sqlite:///"):]
+        if raw_path.startswith("./"):
+            raw_path = raw_path[2:]
+        path_obj = Path(raw_path)
+        if not path_obj.is_absolute():
+            path_obj = (ROOT / path_obj).resolve()
+        path_obj.parent.mkdir(parents=True, exist_ok=True)
+        DATABASE_URL = f"sqlite:///{path_obj.as_posix()}"
+    elif env_db:
+        DATABASE_URL = env_db
+    else:
+        db_file = (DATA_DIR / "scraper.db").resolve()
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        DATABASE_URL = f"sqlite:///{db_file.as_posix()}"
 
 # Scraping & AI settings
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")

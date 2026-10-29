@@ -40,6 +40,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    import traceback
+    tb = traceback.format_exc()
+    print(f"ERROR on {request.url.path}: {exc}\n{tb}", flush=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc), "traceback": tb, "path": str(request.url.path)}
+    )
+
 # API routes
 app.include_router(api_router)
 

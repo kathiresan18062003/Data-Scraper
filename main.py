@@ -9,3 +9,4 @@ if str(ROOT) not in sys.path:
 from backend.app.main import app
 
 __all__ = ["app"]
+
