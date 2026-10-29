@@ -9,13 +9,23 @@ from typing import Any, Callable
 from backend.app.config import OUTPUT_DIR
 from backend.app.database import SessionLocal
 from backend.app.models.job import Job, ProductResult
-from backend.app.scraper import (
-    data_validator as dv,
-    gemini_extractor as gx,
-    scraper,
-    source_discovery as sd,
-)
 from backend.app.services import excel_service
+
+# Scraper sub-modules are imported lazily inside _get_scrapers() to avoid
+# loading heavy native libraries (requests, BeautifulSoup, ddgs, curl_cffi)
+# at module load time, which crashes Vercel serverless cold starts.
+_scrapers: dict | None = None
+
+
+def _get_scrapers() -> dict:
+    global _scrapers
+    if _scrapers is None:
+        from backend.app.scraper import data_validator as dv  # noqa: PLC0415
+        from backend.app.scraper import gemini_extractor as gx  # noqa: PLC0415
+        from backend.app.scraper import scraper  # noqa: PLC0415
+        from backend.app.scraper import source_discovery as sd  # noqa: PLC0415
+        _scrapers = {"dv": dv, "gx": gx, "scraper": scraper, "sd": sd}
+    return _scrapers
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +108,8 @@ def process_single_row(
     }
 
     on_stage("Discover Sources", "")
+    _sc = _get_scrapers()
+    dv, gx, scraper, sd = _sc["dv"], _sc["gx"], _sc["scraper"], _sc["sd"]
     candidates_list = list(sd.candidates(row, max_total=MAX_CANDIDATES))
     logger.info(f"Row {row.get('row')}: MPN='{mpn}' MFR='{mfr}': found {len(candidates_list)} candidate(s).")
 

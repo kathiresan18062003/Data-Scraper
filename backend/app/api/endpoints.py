@@ -31,7 +31,13 @@ from backend.app.schemas.job import (
     ProductResultsPage,
     UploadResponse,
 )
-from backend.app.services import excel_service, job_runner
+from backend.app.services import excel_service
+
+# job_runner is imported lazily to avoid pulling the full scraper/ddgs chain at
+# module load time (which crashes Vercel's serverless cold start).
+def _get_job_runner():
+    from backend.app.services import job_runner as _jr
+    return _jr
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -249,7 +255,7 @@ def create_and_start_job(req: JobStartRequest, db: Session = Depends(get_db)):
     db.refresh(job)
 
     # Start scraping asynchronously
-    job_runner.start_job_in_background(job_id)
+    _get_job_runner().start_job_in_background(job_id)
 
     return _format_job(job)
 
@@ -269,10 +275,10 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
     job = _get_job_or_404(job_id, db)
     # Serverless polling progression
     if job.status in ("RUNNING", "PENDING"):
-        controller = job_runner.get_controller(job_id)
+        controller = _get_job_runner().get_controller(job_id)
         if not (controller.thread and controller.thread.is_alive()):
             try:
-                job_runner.process_job_step(job_id)
+                _get_job_runner().process_job_step(job_id)
                 db.refresh(job)
             except Exception as e:
                 logger.warning(f"Error stepping job {job_id}: {e}")
@@ -282,14 +288,14 @@ def get_job(job_id: str, db: Session = Depends(get_db)):
 @router.post("/jobs/{job_id}/start", response_model=JobResponse)
 def start_job(job_id: str, db: Session = Depends(get_db)):
     job = _get_job_or_404(job_id, db)
-    job_runner.start_job_in_background(job_id)
+    _get_job_runner().start_job_in_background(job_id)
     return _format_job(job)
 
 
 @router.post("/jobs/{job_id}/pause", response_model=JobResponse)
 def pause_job(job_id: str, db: Session = Depends(get_db)):
     job = _get_job_or_404(job_id, db)
-    controller = job_runner.get_controller(job_id)
+    controller = _get_job_runner().get_controller(job_id)
     controller.pause()
     job.status = "PAUSED"
     db.commit()
@@ -299,10 +305,10 @@ def pause_job(job_id: str, db: Session = Depends(get_db)):
 @router.post("/jobs/{job_id}/resume", response_model=JobResponse)
 def resume_job(job_id: str, db: Session = Depends(get_db)):
     job = _get_job_or_404(job_id, db)
-    controller = job_runner.get_controller(job_id)
+    controller = _get_job_runner().get_controller(job_id)
     controller.resume()
     if not controller.is_running:
-        job_runner.start_job_in_background(job_id)
+        _get_job_runner().start_job_in_background(job_id)
     else:
         job.status = "RUNNING"
         db.commit()
@@ -312,7 +318,7 @@ def resume_job(job_id: str, db: Session = Depends(get_db)):
 @router.post("/jobs/{job_id}/cancel", response_model=JobResponse)
 def cancel_job(job_id: str, db: Session = Depends(get_db)):
     job = _get_job_or_404(job_id, db)
-    controller = job_runner.get_controller(job_id)
+    controller = _get_job_runner().get_controller(job_id)
     controller.cancel()
     job.status = "CANCELLED"
     db.commit()
@@ -328,14 +334,14 @@ def stop_job(job_id: str, db: Session = Depends(get_db)):
 @router.post("/jobs/{job_id}/retry", response_model=JobResponse)
 def retry_failed_products(job_id: str, db: Session = Depends(get_db)):
     job = _get_job_or_404(job_id, db)
-    controller = job_runner.get_controller(job_id)
+    controller = _get_job_runner().get_controller(job_id)
     if controller.is_running:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Job is currently running. Pause or stop it before retrying."
         )
 
-    job_runner.start_job_in_background(job_id, retry_failed_only=True)
+    _get_job_runner().start_job_in_background(job_id, retry_failed_only=True)
     job.status = "RUNNING"
     db.commit()
     return _format_job(job)
@@ -457,7 +463,7 @@ def download_excel_by_path(
 def delete_job(job_id: str, db: Session = Depends(get_db)):
     job = _get_job_or_404(job_id, db)
 
-    controller = job_runner.get_controller(job_id)
+    controller = _get_job_runner().get_controller(job_id)
     if controller.is_running:
         controller.cancel()
 
@@ -504,3 +510,4 @@ async def job_events(job_id: str):
             await asyncio.sleep(1.0)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
