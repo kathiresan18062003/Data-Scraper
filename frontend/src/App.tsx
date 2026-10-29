@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { SpeedInsights } from '@vercel/speed-insights/react';
 import { Navbar } from './components/Navbar';
 import { DashboardPage } from './pages/DashboardPage';
 import { UploadPage } from './pages/UploadPage';
@@ -78,6 +79,7 @@ export const App: React.FC = () => {
           <SettingsPage health={health} />
         )}
       </main>
+      <SpeedInsights />
     </div>
   );
 };
