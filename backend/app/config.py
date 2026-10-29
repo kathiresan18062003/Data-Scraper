@@ -8,17 +8,32 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 # Load .env file
 load_dotenv(ROOT / ".env")
 
+# Detect Vercel serverless environment (read-only filesystem except /tmp)
+IS_VERCEL = bool(os.getenv("VERCEL"))
+
 # Directories
-DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT / "data")))
+if IS_VERCEL:
+    DATA_DIR = Path("/tmp/data")
+    OUTPUT_DIR = Path("/tmp/output")
+    CACHE_DIR = Path("/tmp/cache")
+else:
+    DATA_DIR = Path(os.getenv("DATA_DIR", str(ROOT / "data")))
+    OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(ROOT / "output")))
+    CACHE_DIR = ROOT / ".cache"
+
 UPLOAD_DIR = DATA_DIR / "uploads"
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", str(ROOT / "output")))
-CACHE_DIR = ROOT / ".cache"
 
 for _d in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR, CACHE_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
+    try:
+        _d.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
 # Database
-DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATA_DIR / 'scraper.db'}")
+if IS_VERCEL:
+    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////tmp/scraper.db")
+else:
+    DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATA_DIR / 'scraper.db'}")
 
 # Scraping & AI settings
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -54,4 +69,3 @@ def is_gemini_available() -> bool:
 
 def get_cors_origins() -> list[str]:
     return [orig.strip() for orig in FRONTEND_ORIGIN.split(",") if orig.strip()]
-
