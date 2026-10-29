@@ -22,7 +22,7 @@ def _get_ddgs():
     return None
 
 
-def web_search(q: str, n: int = 8) -> list[str]:
+def web_search(q: str, n: int = 4) -> list[str]:
     try:
         ddgs_cls = _get_ddgs()
         if not ddgs_cls:
@@ -34,6 +34,8 @@ def web_search(q: str, n: int = 8) -> list[str]:
 
 
 def usable(u: str) -> bool:
+    if not u or not isinstance(u, str):
+        return False
     p = urlparse(u)
     return (
         p.scheme.startswith("http")
@@ -47,7 +49,7 @@ def mfr_domain(mfr: str) -> str | None:
 
 
 def candidates(row: dict, _unused=None):
-    """Yield (source_type, url). Existing workbook URL, manufacturer site, then search hits."""
+    """Yield (source_type, url). If existing workbook URL is provided, use it directly. Otherwise check manufacturer and web search."""
     seen = set()
 
     def new(u: str) -> bool:
@@ -56,24 +58,37 @@ def candidates(row: dict, _unused=None):
             return True
         return False
 
+    # 1. Existing workbook URL
+    direct_url = (row.get("url") or "").strip()
+    if direct_url.startswith("http") and new(direct_url):
+        yield "EXISTING URL", direct_url
+        return
+
     mpn, mfr = row.get("mpn", ""), row.get("mfr", "")
     alt = dv.strip_line_code(mpn)
 
-    if row.get("url", "").startswith("http") and new(row["url"]):
-        yield "EXISTING URL", row["url"]
-
+    # 2. Manufacturer official site
     d = mfr_domain(mfr)
     if d:
-        for u in web_search(f'site:{d} "{mpn}"', 4):
+        for u in web_search(f'site:{d} "{mpn}"', 2):
             if new(u):
                 yield "MANUFACTURER", u
+                if len(seen) >= 2:
+                    return
 
-    queries = [f'"{mfr}" "{mpn}"', f'{mfr} {mpn} buy', f'"{mpn}" {mfr} specifications']
+    # 3. Targeted Web Search (fast top results)
+    queries = []
+    if mfr and mfr.lower() not in ("unknown", "n/a", "none", ""):
+        queries.append(f'"{mfr}" "{mpn}"')
+        if alt != mpn:
+            queries.append(f'"{mfr}" "{alt}"')
+    queries.append(f'"{mpn}"')
     if alt != mpn:
-        queries += [f'"{mfr}" "{alt}"', f'{mfr} {alt} buy']
+        queries.append(f'"{alt}"')
 
     for q in queries:
-        for u in web_search(q):
+        for u in web_search(q, 3):
             if new(u):
                 yield "WEB SEARCH", u
-
+                if len(seen) >= 3:
+                    return

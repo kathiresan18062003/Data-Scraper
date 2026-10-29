@@ -30,6 +30,7 @@ class JobStartRequest(BaseModel):
     timeout: int = Field(default=20, ge=5, le=120)
     retries: int = Field(default=2, ge=0, le=5)
     use_gemini: bool = Field(default=True)
+    gemini_api_key: Optional[str] = Field(default=None)
     save_every: int = Field(default=1, ge=1, le=100)
 
 

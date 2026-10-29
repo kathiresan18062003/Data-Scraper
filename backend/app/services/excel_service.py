@@ -76,7 +76,11 @@ def sheet_names(path: Path) -> list[str]:
 
 
 def get_headers(ws: openpyxl.worksheet.worksheet.Worksheet) -> dict[str, int]:
-    return {str(c.value).strip().lower(): c.column for c in ws[1] if c.value is not None}
+    for row_idx in (1, 2):
+        row_cells = [c for c in ws[row_idx] if c.value is not None and str(c.value).strip()]
+        if row_cells:
+            return {str(c.value).strip().lower(): c.column for c in row_cells}
+    return {}
 
 
 def detect_columns(ws: openpyxl.worksheet.worksheet.Worksheet) -> dict[str, str | None]:
@@ -101,7 +105,9 @@ def get_sheet_info(file_path: Path) -> list[SheetInfo]:
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
         headers_dict = get_headers(ws)
-        headers_list = [str(c.value).strip() for c in ws[1] if c.value is not None]
+        headers_list = [str(c.value).strip() for c in ws[1] if c.value is not None and str(c.value).strip()]
+        if not headers_list and ws.max_row >= 2:
+            headers_list = [str(c.value).strip() for c in ws[2] if c.value is not None and str(c.value).strip()]
         detected = detect_columns(ws)
 
         preview_rows = []
@@ -124,10 +130,18 @@ def read_rows(ws: openpyxl.worksheet.worksheet.Worksheet, cmap: dict[str, str], 
     h = get_headers(ws)
 
     def val(r: int, key: str) -> str:
-        col_name = (cmap.get(key) or "").lower()
-        if not col_name or col_name not in h:
+        col_name = (cmap.get(key) or "").strip().lower()
+        if not col_name:
             return ""
-        cell_val = ws.cell(r, h[col_name]).value
+        col_idx = h.get(col_name)
+        if not col_idx:
+            for header, idx in h.items():
+                if header == col_name or col_name in header or header in col_name:
+                    col_idx = idx
+                    break
+        if not col_idx:
+            return ""
+        cell_val = ws.cell(r, col_idx).value
         return str(cell_val).strip() if cell_val is not None else ""
 
     rows = []
@@ -136,11 +150,11 @@ def read_rows(ws: openpyxl.worksheet.worksheet.Worksheet, cmap: dict[str, str], 
         mfr = val(r, "mfr")
         title = val(r, "title")
         url = val(r, "url")
-        if mpn and mfr:
+        if mpn:
             rows.append({
                 "row": r,
                 "mpn": mpn,
-                "mfr": mfr,
+                "mfr": mfr or "Unknown",
                 "title": title,
                 "url": url
             })

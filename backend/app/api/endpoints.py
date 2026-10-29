@@ -1,12 +1,15 @@
 import asyncio
 import json
+import logging
 import os
 import shutil
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+import openpyxl
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import desc, func
 from sqlalchemy.orm import Session
@@ -16,7 +19,7 @@ from backend.app.config import (
     UPLOAD_DIR,
     is_gemini_available,
 )
-from backend.app.database import get_db
+from backend.app.database import get_db, SessionLocal
 from backend.app.models.job import Job, ProductResult
 from backend.app.schemas.job import (
     DashboardStatsResponse,
@@ -30,12 +33,15 @@ from backend.app.schemas.job import (
 )
 from backend.app.services import excel_service, job_runner
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
 
 def _format_job(job: Job) -> JobResponse:
     has_output = False
     if job.output_organized_path and Path(job.output_organized_path).exists():
+        has_output = True
+    elif (OUTPUT_DIR / f"{job.id}_Final_Organized_Output.xlsx").exists():
         has_output = True
     elif (OUTPUT_DIR / "Final_Organized_Output.xlsx").exists():
         has_output = True
@@ -60,13 +66,24 @@ def _format_job(job: Job) -> JobResponse:
     )
 
 
+def _get_job_or_404(job_id: str, db: Session) -> Job:
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return job
+
+
+# ---------------------------------------------------------------------------
+# Health Check
+# ---------------------------------------------------------------------------
+
 @router.get("/health", response_model=HealthResponse)
 def get_health(db: Session = Depends(get_db)):
     db_ok = True
     try:
         db.execute(func.now())
     except Exception:
-        db_ok = True  # SQLite supports standard queries
+        db_ok = True
 
     import importlib.util
     search_ok = bool(
@@ -78,13 +95,18 @@ def get_health(db: Session = Depends(get_db)):
         gemini_available=is_gemini_available(),
         search_available=search_ok,
         database_connected=db_ok,
-        version="2.0.0",
+        version="2.1.0",
     )
 
+
+# ---------------------------------------------------------------------------
+# Dashboard Metrics
+# ---------------------------------------------------------------------------
 
 @router.get("/dashboard", response_model=DashboardStatsResponse)
 def get_dashboard_stats(db: Session = Depends(get_db)):
     jobs = db.query(Job).all()
+
     total_products = sum(j.total_products for j in jobs)
     completed_jobs = sum(1 for j in jobs if j.status == "COMPLETED")
     pending_jobs = sum(1 for j in jobs if j.status == "PENDING")
@@ -95,7 +117,12 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
     review_products = sum(j.review_products for j in jobs)
     failed_products = sum(j.failed_products for j in jobs)
 
-    recent_jobs_db = db.query(Job).order_by(desc(Job.created_at)).limit(5).all()
+    recent_jobs_db = (
+        db.query(Job)
+        .order_by(desc(Job.created_at))
+        .limit(5)
+        .all()
+    )
     recent_jobs = [_format_job(j) for j in recent_jobs_db]
 
     return DashboardStatsResponse(
@@ -111,12 +138,19 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
     )
 
 
+# ---------------------------------------------------------------------------
+# Catalog Upload & Job Initialization
+# ---------------------------------------------------------------------------
+
 @router.post("/jobs/upload", response_model=UploadResponse)
 async def upload_catalog_excel(file: UploadFile = File(...)):
     if not file.filename.lower().endswith((".xlsx", ".xlsm")):
-        raise HTTPException(status_code=400, detail="Only Excel (.xlsx, .xlsm) files are accepted.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only Excel (.xlsx, .xlsm) files are accepted."
+        )
 
-    token = str(uuid.uuid4())
+    token = str(uuid.uuid4().hex)
     ext = Path(file.filename).suffix
     dest_path = UPLOAD_DIR / f"{token}{ext}"
 
@@ -128,7 +162,10 @@ async def upload_catalog_excel(file: UploadFile = File(...)):
     except Exception as e:
         if dest_path.exists():
             dest_path.unlink()
-        raise HTTPException(status_code=400, detail=f"Failed to read workbook: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to read workbook: {str(e)}"
+        )
 
     return UploadResponse(
         file_token=token,
@@ -139,34 +176,67 @@ async def upload_catalog_excel(file: UploadFile = File(...)):
 
 @router.post("/jobs", response_model=JobResponse)
 def create_and_start_job(req: JobStartRequest, db: Session = Depends(get_db)):
-    # Find uploaded file
     matching = list(UPLOAD_DIR.glob(f"{req.file_token}.*"))
     if not matching:
-        raise HTTPException(status_code=404, detail="Uploaded file not found or expired.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Uploaded file not found or expired."
+        )
     file_path = matching[0]
 
     job_id = str(uuid.uuid4())
+
+    total_products = 0
+    scraped_path = None
+    organized_path = None
+    review_path = None
+    try:
+        wb = openpyxl.load_workbook(file_path, data_only=True)
+        ws = wb[req.sheet_name]
+        rows = excel_service.read_rows(ws, req.column_mapping, limit=req.limit)
+        wb.close()
+        total_products = len(rows)
+        excel_paths = excel_service.export_all(file_path, req.sheet_name, rows, {}, job_id=job_id)
+        scraped_path = str(excel_paths["scraped"])
+        organized_path = str(excel_paths["organized"])
+        review_path = str(excel_paths["review"])
+    except Exception as e:
+        logger.warning(f"Initial setup failed for job {job_id}: {e}")
+
+    if total_products == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No products found in worksheet '{req.sheet_name}'. Please verify that the MPN/Part Number column is mapped correctly and contains product records."
+        )
+
     job = Job(
         id=job_id,
         filename=file_path.name,
         original_filename=file_path.name,
         sheet_name=req.sheet_name,
         file_path=str(file_path),
-        status="PENDING",
+        status="RUNNING",
+        total_products=total_products,
+        processed_products=0,
+        output_scraped_path=scraped_path,
+        output_organized_path=organized_path,
+        output_review_path=review_path,
         column_mapping=json.dumps(req.column_mapping),
         config=json.dumps({
             "limit": req.limit,
             "timeout": req.timeout,
             "retries": req.retries,
             "use_gemini": req.use_gemini,
+            "gemini_api_key": req.gemini_api_key or "",
             "save_every": req.save_every,
         }),
+        logs=json.dumps([f"[{datetime.now().strftime('%H:%M:%S')}] Started scraping job for {total_products} products."]),
     )
     db.add(job)
     db.commit()
     db.refresh(job)
 
-    # Start scraping in background
+    # Start scraping asynchronously
     job_runner.start_job_in_background(job_id)
 
     return _format_job(job)
@@ -174,34 +244,39 @@ def create_and_start_job(req: JobStartRequest, db: Session = Depends(get_db)):
 
 @router.get("/jobs", response_model=JobListResponse)
 def list_jobs(db: Session = Depends(get_db)):
-    jobs = db.query(Job).order_by(desc(Job.created_at)).all()
+    jobs = (
+        db.query(Job)
+        .order_by(desc(Job.created_at))
+        .all()
+    )
     return JobListResponse(jobs=[_format_job(j) for j in jobs])
 
 
 @router.get("/jobs/{job_id}", response_model=JobResponse)
 def get_job(job_id: str, db: Session = Depends(get_db)):
-    job = db.query(Job).filter(Job.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    job = _get_job_or_404(job_id, db)
+    # Serverless polling progression
+    if job.status in ("RUNNING", "PENDING"):
+        controller = job_runner.get_controller(job_id)
+        if not (controller.thread and controller.thread.is_alive()):
+            try:
+                job_runner.process_job_step(job_id)
+                db.refresh(job)
+            except Exception as e:
+                logger.warning(f"Error stepping job {job_id}: {e}")
     return _format_job(job)
 
 
 @router.post("/jobs/{job_id}/start", response_model=JobResponse)
 def start_job(job_id: str, db: Session = Depends(get_db)):
-    job = db.query(Job).filter(Job.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
+    job = _get_job_or_404(job_id, db)
     job_runner.start_job_in_background(job_id)
     return _format_job(job)
 
 
 @router.post("/jobs/{job_id}/pause", response_model=JobResponse)
 def pause_job(job_id: str, db: Session = Depends(get_db)):
-    job = db.query(Job).filter(Job.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
+    job = _get_job_or_404(job_id, db)
     controller = job_runner.get_controller(job_id)
     controller.pause()
     job.status = "PAUSED"
@@ -211,10 +286,7 @@ def pause_job(job_id: str, db: Session = Depends(get_db)):
 
 @router.post("/jobs/{job_id}/resume", response_model=JobResponse)
 def resume_job(job_id: str, db: Session = Depends(get_db)):
-    job = db.query(Job).filter(Job.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
+    job = _get_job_or_404(job_id, db)
     controller = job_runner.get_controller(job_id)
     controller.resume()
     if not controller.is_running:
@@ -227,10 +299,7 @@ def resume_job(job_id: str, db: Session = Depends(get_db)):
 
 @router.post("/jobs/{job_id}/cancel", response_model=JobResponse)
 def cancel_job(job_id: str, db: Session = Depends(get_db)):
-    job = db.query(Job).filter(Job.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
+    job = _get_job_or_404(job_id, db)
     controller = job_runner.get_controller(job_id)
     controller.cancel()
     job.status = "CANCELLED"
@@ -238,15 +307,21 @@ def cancel_job(job_id: str, db: Session = Depends(get_db)):
     return _format_job(job)
 
 
+@router.post("/jobs/{job_id}/stop", response_model=JobResponse)
+def stop_job(job_id: str, db: Session = Depends(get_db)):
+    """Graceful stop alias for /cancel."""
+    return cancel_job(job_id, db)
+
+
 @router.post("/jobs/{job_id}/retry", response_model=JobResponse)
 def retry_failed_products(job_id: str, db: Session = Depends(get_db)):
-    job = db.query(Job).filter(Job.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
-
+    job = _get_job_or_404(job_id, db)
     controller = job_runner.get_controller(job_id)
     if controller.is_running:
-        raise HTTPException(status_code=400, detail="Job is currently running. Pause or stop it before retrying.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Job is currently running. Pause or stop it before retrying."
+        )
 
     job_runner.start_job_in_background(job_id, retry_failed_only=True)
     job.status = "RUNNING"
@@ -263,6 +338,7 @@ def get_job_results(
     search: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
+    _get_job_or_404(job_id, db)
     query = db.query(ProductResult).filter(ProductResult.job_id == job_id)
 
     if status and status.upper() != "ALL":
@@ -298,9 +374,10 @@ def get_job_results(
 
 @router.get("/jobs/{job_id}/results/{result_id}", response_model=ProductResultResponse)
 def get_single_product_result(job_id: str, result_id: int, db: Session = Depends(get_db)):
+    _get_job_or_404(job_id, db)
     res = db.query(ProductResult).filter(ProductResult.job_id == job_id, ProductResult.id == result_id).first()
     if not res:
-        raise HTTPException(status_code=404, detail="Product result not found")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Product result not found")
     return ProductResultResponse(**res.to_dict())
 
 
@@ -310,9 +387,7 @@ def download_excel(
     type: str = Query(default="organized", pattern="^(organized|scraped|review)$"),
     db: Session = Depends(get_db),
 ):
-    job = db.query(Job).filter(Job.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    job = _get_job_or_404(job_id, db)
 
     target_file: Path | None = None
     if type == "organized":
@@ -339,7 +414,7 @@ def download_excel(
 
     if not target_file or not target_file.exists():
         raise HTTPException(
-            status_code=404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail="The requested Excel file has not been generated yet. Please start or wait for scraping to begin.",
         )
 
@@ -351,11 +426,24 @@ def download_excel(
     )
 
 
+@router.get("/jobs/{job_id}/downloads/{file_type}")
+def download_excel_by_path(
+    job_id: str,
+    file_type: str,
+    db: Session = Depends(get_db),
+):
+    """Download alias supporting /downloads/{file_type} where file_type in ('organized', 'scraped', 'review')."""
+    if file_type not in ("organized", "scraped", "review"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file type. Must be 'organized', 'scraped', or 'review'."
+        )
+    return download_excel(job_id=job_id, type=file_type, db=db)
+
+
 @router.delete("/jobs/{job_id}")
 def delete_job(job_id: str, db: Session = Depends(get_db)):
-    job = db.query(Job).filter(Job.id == job_id).first()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    job = _get_job_or_404(job_id, db)
 
     controller = job_runner.get_controller(job_id)
     if controller.is_running:
@@ -368,6 +456,14 @@ def delete_job(job_id: str, db: Session = Depends(get_db)):
         except Exception:
             pass
 
+    # Remove generated output files
+    for p in (job.output_organized_path, job.output_scraped_path, job.output_review_path):
+        if p and Path(p).exists():
+            try:
+                Path(p).unlink()
+            except Exception:
+                pass
+
     db.delete(job)
     db.commit()
     return {"message": f"Job {job_id} deleted successfully"}
@@ -376,8 +472,6 @@ def delete_job(job_id: str, db: Session = Depends(get_db)):
 @router.get("/jobs/{job_id}/events")
 async def job_events(job_id: str):
     """Server-Sent Events endpoint for real-time progress streaming."""
-    from backend.app.database import SessionLocal
-
     async def event_generator():
         last_state = ""
         while True:

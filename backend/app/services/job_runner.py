@@ -19,7 +19,7 @@ from backend.app.services import excel_service
 
 logger = logging.getLogger(__name__)
 
-MAX_CANDIDATES = 20
+MAX_CANDIDATES = 4
 MAX_SOURCES = 3
 
 
@@ -72,6 +72,7 @@ def process_single_row(
     retries: int = 2,
     timeout: int | None = None,
     on_stage: Callable[[str, str], None] = lambda s, u="": None,
+    gemini_api_key: str | None = None,
 ) -> dict:
     mpn = row["mpn"]
     mfr = row["mfr"]
@@ -96,11 +97,15 @@ def process_single_row(
         "extraction_method": "deterministic",
     }
 
+    candidates_list = list(sd.candidates(row))
+    logger.info(f"Row MPN='{mpn}' MFR='{mfr}': found {len(candidates_list)} candidate(s).")
+
+    all_fetched = []
     valids = []
     tried = 0
     on_stage("Discover Sources", "")
 
-    for tier, url in sd.candidates(row):
+    for tier, url in candidates_list:
         if tried >= MAX_CANDIDATES or len(res["sources"]) >= MAX_SOURCES:
             break
         tried += 1
@@ -115,36 +120,58 @@ def process_single_row(
         gaps = not (parsed["overview"] and parsed["features"] and parsed["specifications"])
         extraction_method = "deterministic"
 
-        if use_gemini and gx.available() and gaps:
+        if use_gemini and gx.available(gemini_api_key) and gaps:
             on_stage("AI Interpretation (Gemini)", url)
-            gem_res = gx.extract(url, parsed["text"])
-            parsed, extraction_method = gx.merge(parsed, gem_res)
+            gem_res = gx.extract(url, parsed["text"], api_key=gemini_api_key)
+            if gem_res:
+                parsed, extraction_method = gx.merge(parsed, gem_res)
 
         on_stage("Validate Product", url)
         v = dv.validate(mpn, mfr, url, parsed, (), sd.mfr_domain(mfr))
 
+        all_fetched.append((parsed, v, tier, url, extraction_method))
         if v["is_valid"] and url not in res["sources"]:
             res["sources"].append(url)
             valids.append((parsed, v, tier, url, extraction_method))
 
+    selected_candidate = None
     if valids:
-        valids.sort(key=lambda x: -x[1]["score"])  # Highest score first
-        parsed, v, tier, url, extraction_method = valids[0]
-        parsed = dict(parsed, image_urls=list(parsed["image_urls"]))
+        valids.sort(key=lambda x: -x[1]["score"])
+        selected_candidate = valids[0]
         res["sources"] = [x[3] for x in valids]
+    elif all_fetched:
+        all_fetched.sort(key=lambda x: -x[1]["score"])
+        selected_candidate = all_fetched[0]
+        res["sources"] = [selected_candidate[3]]
 
-        # Fill any remaining field gaps from other verified candidate pages
+    if selected_candidate:
+        parsed, v, tier, url, extraction_method = selected_candidate
+        parsed = dict(parsed, image_urls=list(parsed["image_urls"]))
+
+        pool = valids[1:] if valids else all_fetched[1:]
         for key in ("overview", "features", "specifications", "fitments", "image_urls"):
             if not parsed.get(key):
-                for p2, _, _, u2, _ in valids[1:]:
+                for p2, _, _, u2, _ in pool:
                     if p2.get(key):
                         parsed[key] = p2[key]
                         v["notes"].append(f"{key} taken from {u2}")
                         break
 
         missing = [k for k in ("overview", "features", "specifications", "image") if not parsed.get(k if k != "image" else "image_urls")]
-        status = "SUCCESS" if not missing else "REVIEW"
-        reason = "" if not missing else "Missing: " + ", ".join(missing)
+        is_direct_url = bool((row.get("url") or "").strip().startswith("http"))
+
+        if v["is_valid"] and not missing:
+            status = "SUCCESS"
+            reason = ""
+        elif v["is_valid"] and missing:
+            status = "REVIEW"
+            reason = "Missing: " + ", ".join(missing)
+        elif is_direct_url:
+            status = "SUCCESS" if not missing else "REVIEW"
+            reason = "" if not missing else "Missing: " + ", ".join(missing)
+        else:
+            status = "REVIEW"
+            reason = f"Candidate score {v['score']}/35: " + ", ".join(v.get("notes", []))
 
         res.update({
             "status": status,
@@ -162,19 +189,41 @@ def process_single_row(
             "reason": reason,
             "extraction_method": extraction_method,
         })
+    else:
+        res["reason"] = "Could not fetch target page or discovery candidates."
 
     return res
 
 
-def run_job_sync(job_id: str, retry_failed_only: bool = False):
+_STEP_LOCKS: dict[str, threading.Lock] = {}
+_STEP_GLOBAL_LOCK = threading.Lock()
+
+
+def _get_step_lock(job_id: str) -> threading.Lock:
+    with _STEP_GLOBAL_LOCK:
+        if job_id not in _STEP_LOCKS:
+            _STEP_LOCKS[job_id] = threading.Lock()
+        return _STEP_LOCKS[job_id]
+
+
+def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
+    """
+    Executes one row of work for the job synchronously.
+    Returns True if a row was processed, False if the job is finished, paused, or cancelled.
+    """
     controller = get_controller(job_id)
-    controller.is_running = True
+    if controller.is_paused() or controller.is_cancelled():
+        return False
+
+    lock = _get_step_lock(job_id)
+    if not lock.acquire(blocking=False):
+        return False
 
     db = SessionLocal()
     try:
         job: Job | None = db.query(Job).filter(Job.id == job_id).first()
-        if not job:
-            return
+        if not job or job.status in ("COMPLETED", "FAILED", "CANCELLED", "PAUSED"):
+            return False
 
         cfg = job.get_config()
         cmap = job.get_column_mapping()
@@ -184,7 +233,10 @@ def run_job_sync(job_id: str, retry_failed_only: bool = False):
         timeout = cfg.get("timeout", 20)
         retries = cfg.get("retries", 2)
         use_gemini = cfg.get("use_gemini", True)
-        save_every = cfg.get("save_every", 1)
+        gemini_api_key = cfg.get("gemini_api_key") or ""
+
+        if not src_path.exists():
+            return False
 
         import openpyxl
         wb = openpyxl.load_workbook(src_path, data_only=True)
@@ -192,17 +244,163 @@ def run_job_sync(job_id: str, retry_failed_only: bool = False):
         rows = excel_service.read_rows(ws, cmap, limit=limit)
         wb.close()
 
-        # Load existing results from database
+        if not rows:
+            job.status = "COMPLETED"
+            job.completed_at = datetime.now(timezone.utc)
+            db.commit()
+            return False
+
+        if job.total_products != len(rows):
+            job.total_products = len(rows)
+            job.status = "RUNNING"
+            db.commit()
+
         existing_results = {
             r.row_index: r for r in db.query(ProductResult).filter(ProductResult.job_id == job_id).all()
         }
 
-        # In-memory dict formatted for Excel export
-        export_results = {}
-        for row_idx, r in existing_results.items():
-            if retry_failed_only and r.status == "FAILED":
-                continue  # will re-run
-            export_results[row_idx] = {
+        target_row = None
+        target_index = -1
+        for idx, row in enumerate(rows):
+            row_idx = row["row"]
+            if row_idx not in existing_results:
+                target_row = row
+                target_index = idx
+                break
+            elif retry_failed_only and existing_results[row_idx].status == "FAILED":
+                target_row = row
+                target_index = idx
+                break
+
+        def add_log(msg: str):
+            now_str = datetime.now().strftime("%H:%M:%S")
+            entry = f"[{now_str}] {msg}"
+            current_logs = job.get_logs()
+            current_logs.append(entry)
+            job.logs = json.dumps(current_logs[-100:])
+
+        if not target_row:
+            if job.status not in ("CANCELLED", "PAUSED"):
+                job.status = "COMPLETED"
+                job.completed_at = datetime.now(timezone.utc)
+                add_log(f"Finished scraping job. Processed: {job.processed_products}/{job.total_products} products.")
+
+                try:
+                    export_results = {
+                        r.row_index: {
+                            "status": r.status,
+                            "confidence": r.confidence,
+                            "tier": r.tier,
+                            "score": r.score,
+                            "product_title": r.product_name or r.title,
+                            "overview": r.overview,
+                            "features": json.loads(r.features or "[]"),
+                            "specifications": json.loads(r.specifications or "[]"),
+                            "fitments": json.loads(r.fitments or "[]"),
+                            "image": r.image_url,
+                            "sources": json.loads(r.source_urls or "[]"),
+                            "notes": json.loads(r.validation_notes or "[]"),
+                            "reason": r.rework_reason,
+                            "google": r.google_search_url,
+                        }
+                        for r in existing_results.values()
+                    }
+                    excel_paths = excel_service.export_all(src_path, sheet_name, rows, export_results, job_id=job_id)
+                    job.output_scraped_path = str(excel_paths["scraped"])
+                    job.output_organized_path = str(excel_paths["organized"])
+                    job.output_review_path = str(excel_paths["review"])
+                except Exception as e:
+                    logger.warning(f"Final export failed: {e}")
+
+                db.commit()
+            return False
+
+        row = target_row
+        row_idx = row["row"]
+        job.status = "RUNNING"
+        job.current_product_info = json.dumps({
+            "stage": "EXTRACTING",
+            "url": row.get("url", ""),
+            "mpn": row["mpn"],
+            "mfr": row["mfr"],
+            "index": target_index + 1,
+            "total": len(rows),
+        })
+        add_log(f"Row {row_idx} ({target_index+1}/{len(rows)}): {row['mfr']} {row['mpn']}")
+        db.commit()
+
+        try:
+            res = process_single_row(
+                row,
+                use_gemini=use_gemini,
+                retries=retries,
+                timeout=timeout,
+                gemini_api_key=gemini_api_key,
+            )
+        except Exception as e:
+            res = {
+                "status": "FAILED",
+                "tier": "MANUAL REVIEW",
+                "sources": [],
+                "score": 0,
+                "confidence": "REJECTED",
+                "google": excel_service.google_link(row["mfr"], row["mpn"]),
+                "reason": f"Processing error: {str(e)}",
+                "product_title": row.get("title", ""),
+                "overview": "",
+                "features": [],
+                "specifications": [],
+                "fitments": [],
+                "image": "",
+                "notes": [str(e)],
+                "missing": ["overview", "features", "specifications", "image"],
+                "extraction_method": "deterministic",
+            }
+
+        db_res = existing_results.get(row_idx)
+        if not db_res:
+            db_res = ProductResult(
+                job_id=job_id,
+                row_index=row_idx,
+                mpn=row["mpn"],
+                manufacturer=row["mfr"]
+            )
+            db.add(db_res)
+            existing_results[row_idx] = db_res
+
+        db_res.mpn = row["mpn"]
+        db_res.manufacturer = row["mfr"]
+        db_res.title = row.get("title", "")
+        db_res.product_name = res.get("product_title", "")
+        db_res.status = res.get("status", "FAILED")
+        db_res.confidence = res.get("confidence", "REJECTED")
+        db_res.tier = res.get("tier", "MANUAL REVIEW")
+        db_res.score = res.get("score", 0)
+        db_res.image_url = res.get("image", "")
+        db_res.image_urls = json.dumps([res.get("image")] if res.get("image") else [])
+        db_res.source_url = res.get("sources", [""])[0] if res.get("sources") else ""
+        db_res.source_urls = json.dumps(res.get("sources", []))
+        db_res.data_source_urls = json.dumps(res.get("sources", []))
+        db_res.overview = res.get("overview", "")
+        db_res.features = json.dumps(res.get("features", []))
+        db_res.specifications = json.dumps(res.get("specifications", []))
+        db_res.fitments = json.dumps(res.get("fitments", []))
+        db_res.missing_fields = json.dumps(res.get("missing", []))
+        db_res.validation_notes = json.dumps(res.get("notes", []))
+        db_res.rework_reason = res.get("reason", "")
+        db_res.google_search_url = res.get("google", "")
+        db_res.extraction_method = res.get("extraction_method", "deterministic")
+
+        all_res = list(existing_results.values())
+        job.processed_products = len(all_res)
+        job.successful_products = sum(1 for r in all_res if r.status == "SUCCESS")
+        job.review_products = sum(1 for r in all_res if r.status == "REVIEW")
+        job.failed_products = sum(1 for r in all_res if r.status == "FAILED")
+
+        add_log(f"-> {res['status']} ({res.get('tier')}) {res.get('reason', '')}")
+
+        export_results = {
+            r.row_index: {
                 "status": r.status,
                 "confidence": r.confidence,
                 "tier": r.tier,
@@ -218,198 +416,53 @@ def run_job_sync(job_id: str, retry_failed_only: bool = False):
                 "reason": r.rework_reason,
                 "google": r.google_search_url,
             }
+            for r in existing_results.values()
+        }
+        try:
+            excel_paths = excel_service.export_all(src_path, sheet_name, rows, export_results, job_id=job_id)
+            job.output_scraped_path = str(excel_paths["scraped"])
+            job.output_organized_path = str(excel_paths["organized"])
+            job.output_review_path = str(excel_paths["review"])
+        except Exception as e:
+            logger.warning(f"Incremental export failed: {e}")
 
-        job.status = "RUNNING"
-        job.total_products = len(rows)
         db.commit()
+        return True
 
-        def add_log(msg: str):
-            now_str = datetime.now().strftime("%H:%M:%S")
-            entry = f"[{now_str}] {msg}"
-            current_logs = job.get_logs()
-            current_logs.append(entry)
-            job.logs = json.dumps(current_logs[-100:])  # keep last 100 logs
-            db.commit()
+    except Exception as exc:
+        logger.exception(f"Unexpected error in process_job_step for job {job_id}: {exc}")
+        return False
+    finally:
+        db.close()
+        lock.release()
 
-        def update_current_info(stage: str, url: str, row: dict, index: int, total: int):
-            job.current_product_info = json.dumps({
-                "stage": stage,
-                "url": url,
-                "mpn": row["mpn"],
-                "mfr": row["mfr"],
-                "index": index + 1,
-                "total": total
-            })
-            db.commit()
 
-        add_log(f"Started scraping job for {len(rows)} products.")
-
-        # Create output files immediately
-        try:
-            excel_paths = excel_service.export_all(src_path, sheet_name, rows, export_results, job_id=job_id)
-            job.output_scraped_path = str(excel_paths["scraped"])
-            job.output_organized_path = str(excel_paths["organized"])
-            job.output_review_path = str(excel_paths["review"])
-            db.commit()
-        except Exception as e:
-            add_log(f"Warning: Initial Excel export creation failed: {e}")
-
-        newly_processed = 0
-
-        for i, row in enumerate(rows):
-            # Check pause / cancel
+def run_job_sync(job_id: str, retry_failed_only: bool = False):
+    controller = get_controller(job_id)
+    controller.is_running = True
+    try:
+        while True:
             if controller.is_cancelled():
-                job.status = "CANCELLED"
-                add_log("Job was cancelled by user.")
                 break
-
             controller.wait_if_paused()
-            if controller.is_paused():
-                job.status = "PAUSED"
-                add_log("Job is paused.")
-                db.commit()
-                while controller.is_paused() and not controller.is_cancelled():
-                    time.sleep(0.5)
-                if controller.is_cancelled():
-                    job.status = "CANCELLED"
-                    add_log("Job was cancelled while paused.")
-                    break
-                job.status = "RUNNING"
-                add_log("Job resumed.")
-                db.commit()
-
-            row_idx = row["row"]
-
-            # If already processed and not retrying this row, skip
-            if row_idx in export_results and not (retry_failed_only and existing_results.get(row_idx) and existing_results[row_idx].status == "FAILED"):
-                continue
-
-            stage_fn = lambda stg, u="": update_current_info(stg, u, row, i, len(rows))
-            add_log(f"Row {row_idx} ({i+1}/{len(rows)}): {row['mfr']} {row['mpn']}")
-
-            try:
-                res = process_single_row(
-                    row,
-                    use_gemini=use_gemini,
-                    retries=retries,
-                    timeout=timeout,
-                    on_stage=stage_fn,
-                )
-            except Exception as e:
-                add_log(f"Error processing row {row_idx}: {e}")
-                res = {
-                    "status": "FAILED",
-                    "tier": "MANUAL REVIEW",
-                    "sources": [],
-                    "score": 0,
-                    "confidence": "REJECTED",
-                    "google": excel_service.google_link(row["mfr"], row["mpn"]),
-                    "reason": f"Processing error: {str(e)}",
-                    "product_title": row.get("title", ""),
-                    "overview": "",
-                    "features": [],
-                    "specifications": [],
-                    "fitments": [],
-                    "image": "",
-                    "notes": [str(e)],
-                    "missing": ["overview", "features", "specifications", "image"],
-                    "extraction_method": "deterministic",
-                }
-
-            # Update SQLite ProductResult
-            db_res = existing_results.get(row_idx)
-            if not db_res:
-                db_res = ProductResult(job_id=job_id, row_index=row_idx, mpn=row["mpn"], manufacturer=row["mfr"])
-                db.add(db_res)
-                existing_results[row_idx] = db_res
-
-            db_res.mpn = row["mpn"]
-            db_res.manufacturer = row["mfr"]
-            db_res.title = row.get("title", "")
-            db_res.product_name = res.get("product_title", "")
-            db_res.status = res.get("status", "FAILED")
-            db_res.confidence = res.get("confidence", "REJECTED")
-            db_res.tier = res.get("tier", "MANUAL REVIEW")
-            db_res.score = res.get("score", 0)
-            db_res.image_url = res.get("image", "")
-            db_res.image_urls = json.dumps([res.get("image")] if res.get("image") else [])
-            db_res.source_url = res.get("sources", [""])[0] if res.get("sources") else ""
-            db_res.source_urls = json.dumps(res.get("sources", []))
-            db_res.data_source_urls = json.dumps(res.get("sources", []))
-            db_res.overview = res.get("overview", "")
-            db_res.features = json.dumps(res.get("features", []))
-            db_res.specifications = json.dumps(res.get("specifications", []))
-            db_res.fitments = json.dumps(res.get("fitments", []))
-            db_res.missing_fields = json.dumps(res.get("missing", []))
-            db_res.validation_notes = json.dumps(res.get("notes", []))
-            db_res.rework_reason = res.get("reason", "")
-            db_res.google_search_url = res.get("google", "")
-            db_res.extraction_method = res.get("extraction_method", "deterministic")
-
-            # Update in-memory export dict
-            export_results[row_idx] = res
-
-            # Update Job statistics
-            newly_processed += 1
-            all_statuses = [r["status"] for r in export_results.values()]
-            job.processed_products = len(export_results)
-            job.successful_products = all_statuses.count("SUCCESS")
-            job.review_products = all_statuses.count("REVIEW")
-            job.failed_products = all_statuses.count("FAILED")
-
-            db.commit()
-
-            add_log(f"-> {res['status']} ({res.get('tier')}) {res.get('reason', '')}")
-
-            # Incremental save to Excel
-            if save_every > 0 and (newly_processed % save_every == 0):
-                try:
-                    excel_paths = excel_service.export_all(src_path, sheet_name, rows, export_results, job_id=job_id)
-                    job.output_scraped_path = str(excel_paths["scraped"])
-                    job.output_organized_path = str(excel_paths["organized"])
-                    job.output_review_path = str(excel_paths["review"])
-                    db.commit()
-                except Exception as e:
-                    add_log(f"Warning: Incremental Excel save failed: {e}")
-
-        # Finalize job status if not already cancelled or paused
-        if job.status not in ("CANCELLED", "PAUSED"):
-            job.status = "COMPLETED"
-            job.completed_at = datetime.now(timezone.utc)
-            add_log(f"Finished scraping job. Processed: {job.processed_products}/{job.total_products} products.")
-
-        # Final export
-        try:
-            excel_paths = excel_service.export_all(src_path, sheet_name, rows, export_results, job_id=job_id)
-            job.output_scraped_path = str(excel_paths["scraped"])
-            job.output_organized_path = str(excel_paths["organized"])
-            job.output_review_path = str(excel_paths["review"])
-            db.commit()
-        except Exception as e:
-            add_log(f"Warning: Final Excel export failed: {e}")
-
-    except Exception as e:
-        logger.exception("Error in job runner")
-        try:
-            job = db.query(Job).filter(Job.id == job_id).first()
-            if job:
-                job.status = "FAILED"
-                add_log(f"Fatal error: {e}")
-                db.commit()
-        except Exception:
-            pass
+            if controller.is_cancelled():
+                break
+            more = process_job_step(job_id, retry_failed_only=retry_failed_only)
+            if not more:
+                break
+            time.sleep(0.1)
     finally:
         controller.is_running = False
-        db.close()
 
 
 def start_job_in_background(job_id: str, retry_failed_only: bool = False):
     controller = get_controller(job_id)
-    if controller.is_running:
-        return
-    controller._cancel_event.clear()
-    controller._pause_event.set()
-    t = threading.Thread(target=run_job_sync, args=(job_id, retry_failed_only), daemon=True)
+    controller.resume()
+    t = threading.Thread(
+        target=run_job_sync,
+        args=(job_id, retry_failed_only),
+        daemon=True,
+        name=f"job-{job_id[:8]}"
+    )
     controller.thread = t
     t.start()
-

@@ -79,6 +79,9 @@ export const api = {
   cancelJob: (jobId: string) =>
     request<Job>(`/jobs/${jobId}/cancel`, { method: 'POST' }),
 
+  deleteJob: (jobId: string) =>
+    request<{ success: boolean; message: string }>(`/jobs/${jobId}`, { method: 'DELETE' }),
+
   retryFailed: (jobId: string) =>
     request<Job>(`/jobs/${jobId}/retry`, { method: 'POST' }),
 

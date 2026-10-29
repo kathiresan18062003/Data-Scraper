@@ -25,9 +25,12 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
   // Job config state
   const [processAll, setProcessAll] = useState(true);
   const [limit, setLimit] = useState(100);
-  const [timeout, setTimeoutVal] = useState(20);
-  const [retries, setRetries] = useState(2);
-  const [useGemini, setUseGemini] = useState(geminiAvailable);
+  const [timeout, setTimeoutVal] = useState(() => Number(localStorage.getItem('scraper_timeout') || 20));
+  const [retries, setRetries] = useState(() => Number(localStorage.getItem('scraper_retries') || 2));
+  const [geminiKeyInput, setGeminiKeyInput] = useState(() => localStorage.getItem('gemini_api_key') || '');
+  const [showKeyInput, setShowKeyInput] = useState(false);
+  const effectiveGeminiAvailable = Boolean(geminiAvailable || geminiKeyInput.trim());
+  const [useGemini, setUseGemini] = useState(effectiveGeminiAvailable);
   const [periodicSave, setPeriodicSave] = useState(true);
   const [saveEvery, setSaveEvery] = useState(1);
 
@@ -93,6 +96,10 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
     setError(null);
 
     try {
+      if (geminiKeyInput.trim()) {
+        localStorage.setItem('gemini_api_key', geminiKeyInput.trim());
+      }
+
       const newJob = await api.createJob({
         file_token: uploadData.file_token,
         sheet_name: currentSheet.name,
@@ -102,6 +109,7 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
         retries: Number(retries),
         use_gemini: Boolean(useGemini),
         save_every: periodicSave ? Number(saveEvery) : 0,
+        gemini_api_key: geminiKeyInput.trim() || undefined,
       });
 
       onJobStarted(newJob.id);
@@ -379,8 +387,13 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
                 <input
                   type="checkbox"
                   checked={useGemini}
-                  disabled={!geminiAvailable}
-                  onChange={(e) => setUseGemini(e.target.checked)}
+                  onChange={(e) => {
+                    const next = e.target.checked;
+                    setUseGemini(next);
+                    if (next && !effectiveGeminiAvailable) {
+                      setShowKeyInput(true);
+                    }
+                  }}
                   className="rounded text-purple-600 focus:ring-purple-500 h-4 w-4"
                 />
                 <span className="text-xs font-bold text-slate-800 flex items-center space-x-1">
@@ -388,9 +401,40 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
                   <span>Google Gemini AI</span>
                 </span>
               </label>
-              <span className="text-[11px] text-slate-400 block">
-                {geminiAvailable ? 'Fills missing specs & overview' : 'No API key configured'}
-              </span>
+              <div className="flex items-center justify-between text-[11px]">
+                <span className="text-slate-400">
+                  {effectiveGeminiAvailable
+                    ? 'Active (Fills missing specs)'
+                    : 'Deterministic mode (no key)'}
+                </span>
+                {!effectiveGeminiAvailable && (
+                  <button
+                    type="button"
+                    onClick={() => setShowKeyInput(!showKeyInput)}
+                    className="text-purple-600 hover:text-purple-700 font-semibold underline ml-1"
+                  >
+                    {showKeyInput ? 'Hide' : '+ Add Key'}
+                  </button>
+                )}
+              </div>
+
+              {showKeyInput && (
+                <div className="mt-2 space-y-1">
+                  <input
+                    type="password"
+                    placeholder="Paste Gemini API key (AIzaSy...)"
+                    value={geminiKeyInput}
+                    onChange={(e) => {
+                      setGeminiKeyInput(e.target.value);
+                      if (e.target.value.trim()) {
+                        setUseGemini(true);
+                      }
+                    }}
+                    className="w-full px-2 py-1 text-xs border border-purple-300 rounded font-mono"
+                  />
+                  <span className="text-[10px] text-purple-600 block">Key will be saved and used for this scrape</span>
+                </div>
+              )}
             </div>
           </div>
 

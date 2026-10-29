@@ -90,6 +90,7 @@ export interface JobStartRequest {
   retries: number;
   use_gemini: boolean;
   save_every: number;
+  gemini_api_key?: string | null;
 }
 
 export interface ProductResultsPage {

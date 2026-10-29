@@ -55,7 +55,9 @@ def test_nonexistent_job_endpoints():
     assert client.post(f"/api/jobs/{fake_id}/pause").status_code == 404
     assert client.post(f"/api/jobs/{fake_id}/resume").status_code == 404
     assert client.post(f"/api/jobs/{fake_id}/cancel").status_code == 404
+    assert client.post(f"/api/jobs/{fake_id}/stop").status_code == 404
     assert client.get(f"/api/jobs/{fake_id}/download").status_code == 404
+    assert client.get(f"/api/jobs/{fake_id}/downloads/organized").status_code == 404
 
 
 def test_upload_and_job_flow():
@@ -123,7 +125,77 @@ def test_upload_and_job_flow():
     resume_res = client.post(f"/api/jobs/{job_id}/resume")
     assert resume_res.status_code == 200
 
-    # 6. Get Results
+    # 6. Stop
+    stop_res = client.post(f"/api/jobs/{job_id}/stop")
+    assert stop_res.status_code == 200
+    assert stop_res.json()["status"] in ("CANCELLED", "COMPLETED", "RUNNING")
+
+    # 7. Get Results
     results_res = client.get(f"/api/jobs/{job_id}/results")
     assert results_res.status_code == 200
     assert "items" in results_res.json()
+
+
+def test_controlled_scraping_fixture():
+    """Verify deterministic HTML extraction and validation on a controlled local fixture."""
+    from backend.app.scraper.scraper import parse
+    from backend.app.scraper.data_validator import validate
+
+    html_fixture = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Apex Performance Brake Kit Model APX-9000 - High Output</title>
+        <meta name="description" content="High performance 6-piston brake caliper kit engineered for endurance racing." />
+        <meta property="og:image" content="https://apexperformance.example.com/images/apx-9000-front.jpg" />
+    </head>
+    <body>
+        <h1>Apex Performance Brake Kit APX-9000</h1>
+        <div class="product-info">
+            <span class="mfr">Apex Performance</span>
+            <span class="part-no">Part: APX-9000</span>
+        </div>
+        <div class="product-description">
+            <p>Designed for severe track duty with forged aerospace aluminum calipers and vented slotted rotors.</p>
+            <ul>
+                <li>Forged 6-piston monobloc caliper design</li>
+                <li>Carbon-ceramic 355mm directional slotted rotors</li>
+                <li>DOT-compliant braided stainless steel brake lines</li>
+            </ul>
+        </div>
+        <div class="specifications">
+            <table>
+                <tr><th>Caliper Piston Count</th><td>6 Pistons</td></tr>
+                <tr><th>Rotor Diameter</th><td>355 mm (14.0 in)</td></tr>
+                <tr><th>Piston Material</th><td>Stainless Steel</td></tr>
+                <tr><th>Finish</th><td>Hard Anodized Red</td></tr>
+            </table>
+        </div>
+        <div class="compatibility">
+            <table>
+                <tr><td>Compatible Vehicles</td><td>2015-2023 Ford Mustang GT</td></tr>
+                <tr><td>Fitment Type</td><td>Direct Bolt-on Replacement</td></tr>
+            </table>
+        </div>
+    </body>
+    </html>
+    """
+
+    url = "https://apexperformance.example.com/products/apx-9000"
+    parsed = parse(html_fixture, url)
+
+    assert "Apex Performance Brake Kit APX-9000" in parsed["product_title"]
+    assert "High performance 6-piston" in parsed["overview"] or "Designed for severe track" in parsed["overview"]
+    assert len(parsed["image_urls"]) >= 1
+    assert "https://apexperformance.example.com/images/apx-9000-front.jpg" in parsed["image_urls"]
+    assert len(parsed["features"]) >= 3
+    assert any("Forged 6-piston" in f for f in parsed["features"])
+    assert len(parsed["specifications"]) >= 4
+    spec_dict = {s["name"]: s["value"] for s in parsed["specifications"]}
+    assert spec_dict.get("Caliper Piston Count") == "6 Pistons"
+    assert spec_dict.get("Rotor Diameter") == "355 mm (14.0 in)"
+    assert len(parsed["fitments"]) >= 1
+
+    v = validate("APX-9000", "Apex Performance", url, parsed, (), "apexperformance.example.com")
+    assert v["is_valid"] is True
+    assert v["score"] >= 35
