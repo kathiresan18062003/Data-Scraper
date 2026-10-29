@@ -3,9 +3,8 @@
   "version": "2.0.0",
   "private": true,
   "scripts": {
-    "build": "cd frontend && npm install && npm run build",
-    "dev": "npm run dev --prefix frontend",
-    "preview": "npm run preview --prefix frontend"
+    "build": "npm --prefix frontend install && npm --prefix frontend run build",
+    "dev": "npm --prefix frontend run dev",
+    "preview": "npm --prefix frontend run preview"
   }
 }
-

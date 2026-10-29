@@ -1,8 +1,24 @@
+[project]
 name = "product-data-scraper-dashboard"
 version = "2.0.0"
 description = "Product Data Scraper Dashboard with FastAPI backend and React frontend"
 readme = "README.md"
 requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.28.0",
+    "sqlalchemy>=2.0.0",
+    "pydantic>=2.7.0",
+    "openpyxl>=3.1.0",
+    "requests>=2.32.0",
+    "httpx>=0.27.0",
+    "beautifulsoup4>=4.12.0",
+    "python-dotenv>=1.0.0",
+    "python-multipart>=0.0.9",
+    "google-genai>=1.0.0",
+    "ddgs>=9.0.0",
+    "aiofiles>=23.2.1",
+]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
