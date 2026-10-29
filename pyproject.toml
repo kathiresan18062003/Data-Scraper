@@ -1,4 +1,3 @@
-[project]
 name = "product-data-scraper-dashboard"
 version = "2.0.0"
 description = "Product Data Scraper Dashboard with FastAPI backend and React frontend"
