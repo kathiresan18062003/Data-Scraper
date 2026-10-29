@@ -34,7 +34,7 @@ from backend.app.schemas.job import (
 from backend.app.services import excel_service, job_runner
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api")
+router = APIRouter()
 
 
 def _format_job(job: Job) -> JobResponse:

@@ -52,7 +52,8 @@ async def global_exception_handler(request, exc):
         content={"detail": str(exc), "traceback": tb, "path": str(request.url.path)}
     )
 
-# API routes
+# API routes - registered under /api and root so both /api/health and /health work seamlessly
+app.include_router(api_router, prefix="/api")
 app.include_router(api_router)
 
 # Serve built React frontend if available

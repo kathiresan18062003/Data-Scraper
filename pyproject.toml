@@ -3,3 +3,7 @@ version = "2.0.0"
 description = "Product Data Scraper Dashboard with FastAPI backend and React frontend"
 readme = "README.md"
 requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
