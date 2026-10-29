@@ -19,48 +19,76 @@ logger = logging.getLogger("vercel_app")
 
 try:
     from backend.app.main import app
-except Exception as main_import_err:
-    logger.exception("Failed to import backend.app.main, creating standalone serverless FastAPI instance")
-    from fastapi import FastAPI
-    from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import JSONResponse
-
-    app = FastAPI(title="Product Data Scraper Dashboard API", version="2.0.0")
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-
-    @app.get("/api/health")
-    @app.get("/health")
-    def serverless_health():
-        return {
-            "status": "healthy",
-            "gemini_available": bool(os.getenv("GEMINI_API_KEY")),
-            "search_available": True,
-            "database_connected": True,
-            "version": "2.1.0",
-            "mode": "serverless_fallback"
-        }
-
+except Exception as main_err:
     try:
-        from backend.app.api.endpoints import router as api_router
-        app.include_router(api_router, prefix="/api")
-        app.include_router(api_router)
-    except Exception as endpoints_err:
-        err_tb = traceback.format_exc()
-        @app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-        def error_fallback(path_name: str):
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "error": "Backend routing initialization failed",
-                    "main_error": str(main_import_err),
-                    "endpoints_error": str(endpoints_err),
-                    "traceback": err_tb,
+        from fastapi import FastAPI
+        from fastapi.middleware.cors import CORSMiddleware
+        from fastapi.responses import JSONResponse
+
+        app = FastAPI(title="Product Data Scraper Dashboard API", version="2.0.0")
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+        @app.get("/api/health")
+        @app.get("/health")
+        def serverless_health():
+            return {
+                "status": "healthy",
+                "gemini_available": bool(os.getenv("GEMINI_API_KEY")),
+                "search_available": True,
+                "database_connected": True,
+                "version": "2.1.0",
+                "mode": "serverless_fallback"
+            }
+
+        try:
+            from backend.app.api.endpoints import router as api_router
+            app.include_router(api_router, prefix="/api")
+            app.include_router(api_router)
+        except Exception as endpoints_err:
+            err_tb = traceback.format_exc()
+            @app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+            def error_fallback(path_name: str):
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "error": "Backend routing initialization failed",
+                        "main_error": str(main_err),
+                        "endpoints_error": str(endpoints_err),
+                        "traceback": err_tb,
+                    }
+                )
+    except Exception as fastapi_err:
+        from http.server import BaseHTTPRequestHandler
+
+        class handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                response = {
+                    "status": "diagnostic",
+                    "error": "FastAPI is not installed in the serverless environment",
+                    "fastapi_error": str(fastapi_err),
+                    "main_error": str(main_err),
+                    "python_version": sys.version,
+                    "sys_path": sys.path[:5],
                 }
-            )
+                self.wfile.write(json.dumps(response).encode('utf-8'))
+
+            def do_POST(self):
+                self.do_GET()
+
+            def do_OPTIONS(self):
+                self.send_response(200)
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.send_header('Access-Control-Allow-Methods', '*')
+                self.send_header('Access-Control-Allow-Headers', '*')
+                self.end_headers()
