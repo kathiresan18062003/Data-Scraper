@@ -25,18 +25,27 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 
+_db_initialized = False
+
+
+def init_db():
+    global _db_initialized
+    if _db_initialized:
+        return
+    try:
+        import backend.app.models.job  # noqa: F401
+        Base.metadata.create_all(bind=engine)
+        _db_initialized = True
+    except Exception as exc:
+        import logging
+        logging.getLogger("uvicorn.error").warning(f"init_db non-fatal warning: {exc}")
+
+
 def get_db():
+    if not _db_initialized:
+        init_db()
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
-
-
-def init_db():
-    try:
-        import backend.app.models.job  # noqa: F401
-        Base.metadata.create_all(bind=engine)
-    except Exception as exc:
-        import logging
-        logging.getLogger("uvicorn.error").warning(f"init_db non-fatal warning: {exc}")

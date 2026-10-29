@@ -42,7 +42,11 @@ for _d in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR, CACHE_DIR):
 
 # Database
 if IS_VERCEL:
-    DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////tmp/scraper.db")
+    env_db = os.getenv("DATABASE_URL", "")
+    if env_db and not env_db.startswith("sqlite"):
+        DATABASE_URL = env_db
+    else:
+        DATABASE_URL = "sqlite:////tmp/scraper.db"
 else:
     env_db = os.getenv("DATABASE_URL", "")
     if env_db and env_db.startswith("sqlite:///"):

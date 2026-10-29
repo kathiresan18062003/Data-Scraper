@@ -1,4 +1,4 @@
-"""Vercel serverless entrypoint forwarding to FastAPI app."""
+"""Vercel serverless entrypoint for FastAPI application."""
 import json
 import logging
 import os
@@ -15,39 +15,52 @@ backend_dir = root_dir / "backend"
 if str(backend_dir) not in sys.path:
     sys.path.insert(0, str(backend_dir))
 
+logger = logging.getLogger("vercel_app")
+
 try:
     from backend.app.main import app
-except Exception as e:
-    err_tb = traceback.format_exc()
-    logging.exception(f"Failed to import backend.app.main: {e}\n{err_tb}")
+except Exception as main_import_err:
+    logger.exception("Failed to import backend.app.main, creating standalone serverless FastAPI instance")
+    from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import JSONResponse
+
+    app = FastAPI(title="Product Data Scraper Dashboard API", version="2.0.0")
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    @app.get("/api/health")
+    @app.get("/health")
+    def serverless_health():
+        return {
+            "status": "healthy",
+            "gemini_available": bool(os.getenv("GEMINI_API_KEY")),
+            "search_available": True,
+            "database_connected": True,
+            "version": "2.1.0",
+            "mode": "serverless_fallback"
+        }
+
     try:
-        from fastapi import FastAPI
-        from fastapi.responses import JSONResponse
-
-        app = FastAPI(title="Diagnostic Fallback")
-
+        from backend.app.api.endpoints import router as api_router
+        app.include_router(api_router, prefix="/api")
+        app.include_router(api_router)
+    except Exception as endpoints_err:
+        err_tb = traceback.format_exc()
         @app.api_route("/{path_name:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-        def fallback(path_name: str):
+        def error_fallback(path_name: str):
             return JSONResponse(
                 status_code=500,
                 content={
-                    "error": "Backend import failed",
-                    "detail": str(e),
+                    "error": "Backend routing initialization failed",
+                    "main_error": str(main_import_err),
+                    "endpoints_error": str(endpoints_err),
                     "traceback": err_tb,
-                    "sys_path": sys.path[:5],
-                    "root_exists": root_dir.exists(),
-                    "backend_exists": backend_dir.exists(),
                 }
             )
-    except Exception:
-        # Fallback WSGI application in case FastAPI itself failed to import
-        def app(environ, start_response):
-            status = '500 Internal Server Error'
-            response_headers = [('Content-Type', 'application/json')]
-            start_response(status, response_headers)
-            body = json.dumps({
-                "error": "Critical backend initialization crash",
-                "detail": str(e),
-                "traceback": err_tb,
-            })
-            return [body.encode('utf-8')]

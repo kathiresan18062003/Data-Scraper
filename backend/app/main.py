@@ -10,16 +10,6 @@ from backend.app.config import ROOT, get_cors_origins
 from backend.app.database import init_db
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Initialize SQLite database and tables safely
-    try:
-        init_db()
-    except Exception as exc:
-        pass
-    yield
-
-
 app = FastAPI(
     title="Product Data Scraper Dashboard API",
     description="FastAPI Backend for Product Data Scraper with SQLite, incremental Excel saving, and Gemini extraction.",
@@ -27,7 +17,6 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
-    lifespan=lifespan,
 )
 
 # CORS
