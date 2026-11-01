@@ -12,3 +12,6 @@ __pycache__
 .env
 .git
 frontend/node_modules
+node_modules
+*.xlsx
+*.db
