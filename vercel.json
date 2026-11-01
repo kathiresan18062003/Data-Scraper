@@ -1,11 +1,16 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "cd frontend && npm install && npm run build && rm -rf node_modules",
+  "buildCommand": "npm --prefix frontend install && npm --prefix frontend run build && node clean.js",
   "outputDirectory": "frontend/dist",
   "functions": {
+    "api/*.py": {
+      "includeFiles": "backend/**",
+      "excludeFiles": "{frontend/**,node_modules/**,tests/**,data/**,output/**,scratch/**,tools/**,*.md,*.bat}",
+      "maxDuration": 60
+    },
     "api/index.py": {
       "includeFiles": "backend/**",
-      "excludeFiles": "{frontend,node_modules,tests,data,output,scratch,tools}/**",
+      "excludeFiles": "{frontend/**,node_modules/**,tests/**,data/**,output/**,scratch/**,tools/**,*.md,*.bat}",
       "maxDuration": 60
     }
   },

@@ -9,9 +9,13 @@ tests
 tools
 __pycache__
 *.pyc
+*.pyo
+*.pyd
 .env
 .git
 frontend/node_modules
 node_modules
 *.xlsx
 *.db
+*.sqlite3
+*.log
