@@ -32,13 +32,51 @@ def _get_ddgs():
 def web_search(q: str, n: int = 5) -> list[str]:
     try:
         ddgs_cls = _get_ddgs()
-        if not ddgs_cls:
-            return []
-        with ddgs_cls() as d:
-            results = d.text(q, max_results=n)
-            return [r["href"] for r in results if r.get("href")]
+        if ddgs_cls:
+            with ddgs_cls() as d:
+                results = d.text(q, max_results=n)
+                links = [r["href"] for r in results if r.get("href")]
+                if links:
+                    return links[:n]
     except Exception:
-        return []
+        pass
+
+    # Pure-Python fallback using requests and BeautifulSoup
+    try:
+        import requests
+        from bs4 import BeautifulSoup
+        import urllib.parse
+
+        resp = requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": q},
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+                )
+            },
+            timeout=8,
+        )
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, "html.parser")
+            urls = []
+            for a in soup.select("a.result__url, a.result__snippet, .results_links a, a[href*='uddg=']"):
+                href = a.get("href", "")
+                if "uddg=" in href:
+                    parsed = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                    if "uddg" in parsed:
+                        href = parsed["uddg"][0]
+                if href.startswith("http") and usable(href) and href not in urls:
+                    urls.append(href)
+                    if len(urls) >= n:
+                        break
+            if urls:
+                return urls
+    except Exception:
+        pass
+
+    return []
 
 
 def usable(u: str) -> bool:
