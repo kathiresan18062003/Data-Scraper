@@ -172,6 +172,35 @@ All 21 unit and integration tests will execute.
 
 ---
 
+## Deploying for Multiple Users (Render / Railway + Postgres)
+
+Vercel runs the API as short-lived serverless functions: each instance has its own `/tmp` SQLite database, requests stop after 60 s, and jobs only advance while the page is polling. For several people running jobs at the same time, deploy the Docker image to an always-on host with a shared Postgres database instead.
+
+The `Dockerfile` builds the React frontend and serves it from the FastAPI app, so one service hosts both. It listens on `$PORT` (default 8000).
+
+### Render (Blueprint)
+
+1. Render Dashboard → **New → Blueprint** → select this repository. `render.yaml` creates:
+   - a Docker web service with a 1 GB persistent disk at `/var/data` for uploads and Excel outputs,
+   - a managed Postgres database wired into `DATABASE_URL`.
+2. Enter `GEMINI_API_KEY` when prompted (optional).
+
+### Railway
+
+1. **New Project → Deploy from GitHub repo** (Railway detects the `Dockerfile`).
+2. Add a **PostgreSQL** database and set `DATABASE_URL=${{Postgres.DATABASE_URL}}` on the service.
+3. Optionally add a volume mounted at `/var/data` and set `DATA_DIR=/var/data/data`, `OUTPUT_DIR=/var/data/output`.
+
+### Environment variables
+
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | `postgres://…` / `postgresql://…` (Render/Railway format is accepted as-is). Defaults to local SQLite. |
+| `DATA_DIR`, `OUTPUT_DIR` | Where uploads and generated Excel files are stored. |
+| `GEMINI_API_KEY` | Optional Gemini AI extraction. |
+
+---
+
 ## API Endpoints Reference
 
 | Method | Endpoint | Description |

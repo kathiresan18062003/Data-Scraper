@@ -41,14 +41,22 @@ for _d in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR, CACHE_DIR):
         pass
 
 # Database
+def _normalize_db_url(url: str) -> str:
+    # Render/Railway hand out postgres:// or postgresql:// URLs; pin the psycopg (v3) driver
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
+
+
 if IS_VERCEL:
-    env_db = os.getenv("DATABASE_URL", "")
+    env_db = _normalize_db_url(os.getenv("DATABASE_URL", ""))
     if env_db and not env_db.startswith("sqlite"):
         DATABASE_URL = env_db
     else:
         DATABASE_URL = "sqlite:////tmp/scraper.db"
 else:
-    env_db = os.getenv("DATABASE_URL", "")
+    env_db = _normalize_db_url(os.getenv("DATABASE_URL", ""))
     if env_db and env_db.startswith("sqlite:///"):
         raw_path = env_db[len("sqlite:///"):]
         if raw_path.startswith("./"):
