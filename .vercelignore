@@ -19,3 +19,5 @@ node_modules
 *.db
 *.sqlite3
 *.log
+.vercel_python_packages
+.vercel
