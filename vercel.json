@@ -1,8 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
   "buildCommand": "npm --prefix frontend install && npm --prefix frontend run build && node clean.js",
   "outputDirectory": "frontend/dist",
   "functions": {
+<<<<<<< HEAD
     "api/*.py": {
       "includeFiles": "backend/**",
       "excludeFiles": "{frontend/**,node_modules/**,tests/**,data/**,output/**,scratch/**,tools/**,*.md,*.bat}",
@@ -13,9 +15,11 @@
       "excludeFiles": "{frontend/**,node_modules/**,tests/**,data/**,output/**,scratch/**,tools/**,*.md,*.bat}",
       "maxDuration": 660
     },
+=======
+>>>>>>> c66072cc3841e868a26cc55abc50373790febc49
     "api/index.py": {
       "includeFiles": "backend/**",
-      "excludeFiles": "{frontend/**,node_modules/**,tests/**,data/**,output/**,scratch/**,tools/**,*.md,*.bat}",
+      "excludeFiles": "{.vercel_python_packages/**,.vercel/**,.venv/**,venv/**,**/__pycache__/**,frontend/**,node_modules/**,**/node_modules/**,tests/**,data/**,output/**,scratch/**,tools/**,*.md,*.bat,Dockerfile,docker-compose.yml,test_smoke.py}",
       "maxDuration": 60
     }
   },

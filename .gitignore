@@ -27,3 +27,7 @@ output/*
 !output/.gitkeep
 .cache/
 *.tmp
+
+# Vercel build artifacts
+.vercel/
+.vercel_python_packages/
