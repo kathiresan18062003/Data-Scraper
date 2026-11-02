@@ -4,3 +4,4 @@ const fs = require('fs');
     fs.rmSync(p, { recursive: true, force: true });
   }
 });
+
