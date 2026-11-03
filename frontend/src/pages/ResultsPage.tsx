@@ -21,6 +21,8 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({ selectedJobId, onSelec
   const [totalPages, setTotalPages] = useState(1);
   const [statusFilter, setStatusFilter] = useState('ALL');
   const [searchTerm, setSearchTerm] = useState('');
+  const [missingFieldFilter, setMissingFieldFilter] = useState('ALL');
+  const [reasonFilter, setReasonFilter] = useState('');
   const [loading, setLoading] = useState(false);
 
   const [inspectProduct, setInspectProduct] = useState<ProductResult | null>(null);
@@ -47,7 +49,7 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({ selectedJobId, onSelec
     if (!selectedJobId) return;
 
     setLoading(true);
-    api.getJobResults(selectedJobId, page, 25, statusFilter, searchTerm)
+    api.getJobResults(selectedJobId, page, 25, statusFilter, searchTerm, missingFieldFilter, reasonFilter)
       .then((data) => {
         setResults(data.items);
         setTotal(data.total);
@@ -55,7 +57,7 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({ selectedJobId, onSelec
       })
       .catch((err) => console.error('Failed to fetch results', err))
       .finally(() => setLoading(false));
-  }, [selectedJobId, page, statusFilter, searchTerm]);
+  }, [selectedJobId, page, statusFilter, searchTerm, missingFieldFilter, reasonFilter]);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
@@ -187,6 +189,16 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({ selectedJobId, onSelec
           setSearchTerm(s);
           setPage(1);
         }}
+        missingFieldFilter={missingFieldFilter}
+        onMissingFieldFilterChange={(field) => {
+          setMissingFieldFilter(field);
+          setPage(1);
+        }}
+        reasonFilter={reasonFilter}
+        onReasonFilterChange={(reason) => {
+          setReasonFilter(reason);
+          setPage(1);
+        }}
         onSelectProduct={setInspectProduct}
         isLoading={loading}
       />
@@ -199,4 +211,3 @@ export const ResultsPage: React.FC<ResultsPageProps> = ({ selectedJobId, onSelec
     </div>
   );
 };
-

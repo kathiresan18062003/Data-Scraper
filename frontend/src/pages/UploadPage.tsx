@@ -12,7 +12,7 @@ import {
   Filter,
 } from 'lucide-react';
 import { api } from '../services/api';
-import { SheetInfo, UploadResponse } from '../types';
+import { JobPreviewResponse, SheetInfo, UploadResponse } from '../types';
 
 interface UploadPageProps {
   onJobStarted: (jobId: string) => void;
@@ -46,14 +46,15 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
   const [limit, setLimit] = useState<number | ''>('');
   const [timeout, setTimeoutVal] = useState(() => Number(localStorage.getItem('scraper_timeout') || 20));
   const [retries, setRetries] = useState(() => Number(localStorage.getItem('scraper_retries') || 2));
-  const [geminiKeyInput, setGeminiKeyInput] = useState(() => localStorage.getItem('gemini_api_key') || '');
-  const [showKeyInput, setShowKeyInput] = useState(false);
-  const effectiveGeminiAvailable = Boolean(geminiAvailable || geminiKeyInput.trim());
-  const [useGemini, setUseGemini] = useState(effectiveGeminiAvailable);
+  const [useGemini, setUseGemini] = useState(true);
   const [periodicSave, setPeriodicSave] = useState(true);
   const [saveEvery, setSaveEvery] = useState(1);
 
   const [starting, setStarting] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [preflight, setPreflight] = useState<JobPreviewResponse | null>(null);
+  const [preflightSignature, setPreflightSignature] = useState('');
+  const [excludedRows, setExcludedRows] = useState<Set<number>>(new Set());
   const [error, setError] = useState<string | null>(null);
 
   const autoMapSheet = (sheet: SheetInfo) => {
@@ -73,6 +74,9 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
     if (e.target.files && e.target.files[0]) {
       const selectedFile = e.target.files[0];
       setFile(selectedFile);
+      setPreflight(null);
+      setPreflightSignature('');
+      setExcludedRows(new Set());
       setError(null);
 
       setUploading(true);
@@ -100,6 +104,66 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
 
   const currentSheet: SheetInfo | undefined = uploadData?.sheets[selectedSheetIndex];
 
+  const buildPreviewRequest = () => {
+    if (!uploadData || !currentSheet) return null;
+
+    const request = {
+      file_token: uploadData.file_token,
+      sheet_name: currentSheet.name,
+      column_mapping: colMapping,
+      limit: limit !== '' ? Number(limit) : null,
+      start_row: null as number | null,
+      end_row: null as number | null,
+      sno_start: null as number | null,
+      sno_end: null as number | null,
+      exclude_rows: Array.from(excludedRows),
+    };
+    if (processScope === 'range') {
+      const start = parseInt(rangeStart, 10);
+      const end = parseInt(rangeEnd, 10);
+      if (rangeMode === 'sno') {
+        request.sno_start = Number.isNaN(start) ? null : start;
+        request.sno_end = Number.isNaN(end) ? null : end;
+      } else {
+        request.start_row = Number.isNaN(start) ? null : start;
+        request.end_row = Number.isNaN(end) ? null : end;
+      }
+    }
+    return request;
+  };
+  const previewRequest = buildPreviewRequest();
+  const currentPreviewSignature = previewRequest ? JSON.stringify(previewRequest) : '';
+  const hasCurrentPreflight = Boolean(preflight && preflightSignature === currentPreviewSignature);
+  const issueRows = preflight
+    ? [...new Set([
+        ...preflight.missing_identifier_rows,
+        ...preflight.duplicate_rows,
+        ...preflight.invalid_gtin_rows,
+        ...preflight.missing_manufacturer_rows,
+      ])].sort((a, b) => a - b)
+    : [];
+  const rowWarnings = (row: number) => [
+    preflight?.missing_identifier_rows.includes(row) && 'blank product identifier',
+    preflight?.duplicate_rows.includes(row) && 'duplicate MPN/manufacturer',
+    preflight?.invalid_gtin_rows.includes(row) && 'invalid UPC/GTIN check digit or format',
+    preflight?.missing_manufacturer_rows.includes(row) && 'manufacturer is blank',
+  ].filter(Boolean).join(', ');
+
+  const handlePreflight = async () => {
+    if (!previewRequest) return;
+    setPreviewLoading(true);
+    setError(null);
+    try {
+      const result = await api.previewJob(previewRequest);
+      setPreflight(result);
+      setPreflightSignature(JSON.stringify(previewRequest));
+    } catch (err: any) {
+      setError(err.message || 'Failed to validate the selected worksheet');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
   const handleStartScraping = async () => {
     if (!uploadData || !currentSheet) {
       setError('Please upload an Excel workbook first.');
@@ -111,14 +175,15 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
       return;
     }
 
+    if (!hasCurrentPreflight) {
+      setError('Run the preflight check again after changing the worksheet, mapping, or product range.');
+      return;
+    }
+
     setStarting(true);
     setError(null);
 
     try {
-      if (geminiKeyInput.trim()) {
-        localStorage.setItem('gemini_api_key', geminiKeyInput.trim());
-      }
-
       // Build request payload
       const requestPayload: any = {
         file_token: uploadData.file_token,
@@ -129,7 +194,7 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
         retries: Number(retries),
         use_gemini: Boolean(useGemini),
         save_every: periodicSave ? Number(saveEvery) : 1,
-        gemini_api_key: geminiKeyInput.trim() || undefined,
+        exclude_rows: Array.from(excludedRows),
       };
 
       if (processScope === 'range') {
@@ -533,11 +598,7 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
                   type="checkbox"
                   checked={useGemini}
                   onChange={(e) => {
-                    const next = e.target.checked;
-                    setUseGemini(next);
-                    if (next && !effectiveGeminiAvailable) {
-                      setShowKeyInput(true);
-                    }
+                    setUseGemini(e.target.checked);
                   }}
                   className="rounded text-purple-600 focus:ring-purple-500 h-4 w-4"
                 />
@@ -548,38 +609,9 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
               </label>
               <div className="flex items-center justify-between text-[11px]">
                 <span className="text-slate-400">
-                  {effectiveGeminiAvailable
-                    ? 'Active (Fills missing specs)'
-                    : 'Deterministic mode (no key)'}
+                  {geminiAvailable ? 'Server key configured' : 'No server key; deterministic extraction only'}
                 </span>
-                {!effectiveGeminiAvailable && (
-                  <button
-                    type="button"
-                    onClick={() => setShowKeyInput(!showKeyInput)}
-                    className="text-purple-600 hover:text-purple-700 font-semibold underline ml-1"
-                  >
-                    {showKeyInput ? 'Hide' : '+ Add Key'}
-                  </button>
-                )}
               </div>
-
-              {showKeyInput && (
-                <div className="mt-2 space-y-1">
-                  <input
-                    type="password"
-                    placeholder="Paste Gemini API key (AIzaSy...)"
-                    value={geminiKeyInput}
-                    onChange={(e) => {
-                      setGeminiKeyInput(e.target.value);
-                      if (e.target.value.trim()) {
-                        setUseGemini(true);
-                      }
-                    }}
-                    className="w-full px-2 py-1 text-xs border border-purple-300 rounded font-mono"
-                  />
-                  <span className="text-[10px] text-purple-600 block">Key stored in browser for this scrape</span>
-                </div>
-              )}
             </div>
           </div>
 
@@ -618,10 +650,132 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
 
       {/* Start Button */}
       {uploadData && currentSheet && (
-        <div className="flex justify-end">
+        <div className="space-y-4">
+          <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm space-y-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h2 className="text-sm font-bold uppercase tracking-wider text-slate-700">5. Preflight Validation & Search Preview</h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  Checks the selected rows and previews search templates without contacting search engines.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handlePreflight}
+                disabled={previewLoading}
+                className="inline-flex items-center justify-center gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-2 text-xs font-bold text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+              >
+                {previewLoading ? 'Checking workbook…' : 'Validate & Preview'}
+              </button>
+            </div>
+
+            {preflight && (
+              hasCurrentPreflight ? (
+                <>
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+                    {[
+                      ['Products to process', preflight.total_rows],
+                      ['Rows excluded', preflight.excluded_rows_count],
+                      ['Blank identifiers', preflight.missing_identifier_rows.length],
+                      ['Duplicate rows', preflight.duplicate_rows.length],
+                      ['Invalid UPC/GTIN', preflight.invalid_gtin_rows.length],
+                      ['No manufacturer', preflight.missing_manufacturer_rows.length],
+                      ['Existing URLs', preflight.existing_url_rows.length],
+                    ].map(([label, count]) => (
+                      <div key={label} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        <div className="text-[11px] font-semibold text-slate-500">{label}</div>
+                        <div className="mt-1 text-lg font-bold text-slate-900">{count}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {(preflight.missing_identifier_rows.length > 0 ||
+                    preflight.duplicate_rows.length > 0 ||
+                    preflight.invalid_gtin_rows.length > 0 ||
+                    preflight.missing_manufacturer_rows.length > 0) && (
+                    <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                      Review the listed row numbers before starting. Rows without an identifier are ignored, and duplicate MPN/manufacturer pairs are deduplicated by the job.
+                    </p>
+                  )}
+                  {issueRows.length > 0 && (
+                    <div className="space-y-2">
+                      <h3 className="text-xs font-bold text-slate-700">Problem rows — select rows to exclude from this job</h3>
+                      <div className="max-h-48 space-y-1 overflow-y-auto rounded-lg border border-slate-200 p-3">
+                        {issueRows.map((row) => (
+                          <label key={row} className="flex items-start gap-2 text-xs text-slate-700">
+                            <input
+                              type="checkbox"
+                              checked={excludedRows.has(row)}
+                              onChange={(event) => {
+                                setExcludedRows((current) => {
+                                  const next = new Set(current);
+                                  if (event.target.checked) next.add(row);
+                                  else next.delete(row);
+                                  return next;
+                                });
+                              }}
+                              className="mt-0.5 rounded text-blue-600 focus:ring-blue-500"
+                            />
+                            <span>Row {row}: {rowWarnings(row)}</span>
+                          </label>
+                        ))}
+                      </div>
+                      <p className="text-[11px] text-slate-500">
+                        {excludedRows.size} row(s) selected for exclusion. The uploaded workbook itself is not changed.
+                      </p>
+                    </div>
+                  )}
+                  {excludedRows.size > 0 && (
+                    <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-600">
+                      <span>Excluded row(s): {Array.from(excludedRows).sort((a, b) => a - b).join(', ')}</span>
+                      {Array.from(excludedRows).map((row) => (
+                        <button
+                          key={row}
+                          type="button"
+                          onClick={() => setExcludedRows((current) => {
+                            const next = new Set(current);
+                            next.delete(row);
+                            return next;
+                          })}
+                          className="rounded border border-slate-300 px-2 py-1 text-blue-700 hover:bg-blue-50"
+                        >
+                          Include row {row}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {preflight.query_preview.length > 0 && (
+                    <div className="space-y-2">
+                      <h3 className="text-xs font-bold text-slate-700">Example queries (first {preflight.query_preview.length} products)</h3>
+                      {preflight.query_preview.map((item) => (
+                        <div key={item.row} className="rounded-lg border border-slate-200 p-3">
+                          <div className="mb-1 text-xs font-semibold text-slate-800">
+                            Row {item.row}: {item.manufacturer} {item.mpn}
+                          </div>
+                          <ul className="space-y-1">
+                            {item.queries.map((query, index) => (
+                              <li key={`${item.row}-${index}`} className="break-all text-[11px] text-slate-600">
+                                <span className="font-semibold text-blue-700">{query.tier}:</span> {query.query}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <p className="text-xs text-amber-700">The selection changed. Run preflight again to validate the current mapping and range.</p>
+              )
+            )}
+          </div>
+
+          <div className="flex items-center justify-end gap-3">
+            {!hasCurrentPreflight && (
+              <span className="text-xs text-slate-500">Run preflight before starting.</span>
+            )}
           <button
             onClick={handleStartScraping}
-            disabled={starting}
+            disabled={starting || !hasCurrentPreflight}
             className="flex items-center space-x-2 px-8 py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-lg shadow-blue-600/30 transition hover:scale-[1.02] disabled:opacity-50 text-sm"
           >
             {starting ? (
@@ -637,6 +791,7 @@ export const UploadPage: React.FC<UploadPageProps> = ({ onJobStarted, geminiAvai
               </>
             )}
           </button>
+          </div>
         </div>
       )}
     </div>

@@ -1,11 +1,38 @@
 import React from 'react';
 import { X, ExternalLink, Image as ImageIcon, ShieldCheck, Check, AlertCircle, Sparkles } from 'lucide-react';
-import { ProductResult } from '../types';
+import { FieldEvidence, ProductResult } from '../types';
 
 interface ProductDetailModalProps {
   product: ProductResult | null;
   onClose: () => void;
 }
+
+const FieldEvidenceDetails: React.FC<{ label: string; evidence?: FieldEvidence }> = ({ label, evidence }) => {
+  if (!evidence) return null;
+
+  return (
+    <div className="mt-2 rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2 text-xs">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-slate-600">
+        <span className="font-semibold text-slate-700">{label} source:</span>
+        <a
+          href={evidence.source_url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex max-w-full items-center gap-1 truncate text-blue-700 hover:underline"
+        >
+          <span className="truncate">{evidence.source_url}</span>
+          <ExternalLink className="h-3 w-3 flex-shrink-0" />
+        </a>
+        <span className="text-slate-500">({evidence.extraction_method})</span>
+      </div>
+      {evidence.snippet ? (
+        <p className="mt-1 whitespace-pre-wrap text-slate-600">{evidence.snippet}</p>
+      ) : (
+        <p className="mt-1 italic text-amber-700">No supporting page-text excerpt was captured.</p>
+      )}
+    </div>
+  );
+};
 
 export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({ product, onClose }) => {
   if (!product) return null;
@@ -47,7 +74,13 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({ product,
             <h2 className="text-xl font-bold text-slate-900 mt-1">
               {product.manufacturer} {product.mpn}
             </h2>
-            <p className="text-xs text-slate-500">{product.product_name || product.title || 'No product title found'}</p>
+            <p className="text-xs text-slate-500">
+              Source title: {product.product_name || 'Not found on source page'}
+            </p>
+            {product.title && (
+              <p className="text-xs text-slate-400">Catalog title: {product.title}</p>
+            )}
+            <FieldEvidenceDetails label="Product title" evidence={product.field_evidence?.product_title} />
           </div>
 
           <button
@@ -83,6 +116,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({ product,
                     <span>Open full image</span>
                     <ExternalLink className="w-3 h-3" />
                   </a>
+                  <FieldEvidenceDetails label="Image" evidence={product.field_evidence?.image} />
                 </div>
               ) : (
                 <div className="text-center text-slate-400">
@@ -161,6 +195,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({ product,
               <p className="text-xs leading-relaxed text-slate-700 bg-slate-50 p-4 rounded-xl border border-slate-200">
                 {product.overview}
               </p>
+              <FieldEvidenceDetails label="Overview" evidence={product.field_evidence?.overview} />
             </div>
           )}
 
@@ -176,6 +211,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({ product,
                   </li>
                 ))}
               </ul>
+              <FieldEvidenceDetails label="Features" evidence={product.field_evidence?.features} />
             </div>
           )}
 
@@ -201,6 +237,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({ product,
                   </tbody>
                 </table>
               </div>
+              <FieldEvidenceDetails label="Specifications" evidence={product.field_evidence?.specifications} />
             </div>
           )}
 
@@ -215,6 +252,7 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({ product,
                   </span>
                 ))}
               </div>
+              <FieldEvidenceDetails label="Fitments" evidence={product.field_evidence?.fitments} />
             </div>
           )}
 
@@ -247,4 +285,3 @@ export const ProductDetailModal: React.FC<ProductDetailModalProps> = ({ product,
     </div>
   );
 };
-

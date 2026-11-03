@@ -26,6 +26,10 @@ interface ResultsTableProps {
   onStatusFilterChange: (status: string) => void;
   searchTerm: string;
   onSearchChange: (search: string) => void;
+  missingFieldFilter: string;
+  onMissingFieldFilterChange: (field: string) => void;
+  reasonFilter: string;
+  onReasonFilterChange: (reason: string) => void;
   onSelectProduct: (product: ProductResult) => void;
   isLoading: boolean;
 }
@@ -40,6 +44,10 @@ export const ResultsTable: React.FC<ResultsTableProps> = ({
   onStatusFilterChange,
   searchTerm,
   onSearchChange,
+  missingFieldFilter,
+  onMissingFieldFilterChange,
+  reasonFilter,
+  onReasonFilterChange,
   onSelectProduct,
   isLoading,
 }) => {
@@ -65,6 +73,30 @@ export const ResultsTable: React.FC<ResultsTableProps> = ({
             onChange={(e) => onSearchChange(e.target.value)}
             placeholder="Search MPN, Manufacturer, or Product Name..."
             className="w-full pl-9 pr-4 py-2 bg-white border border-slate-300 rounded-lg text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+          />
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="text-xs font-semibold text-slate-500" htmlFor="missing-field-filter">Missing field:</label>
+          <select
+            id="missing-field-filter"
+            value={missingFieldFilter}
+            onChange={(e) => onMissingFieldFilterChange(e.target.value)}
+            className="rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs"
+          >
+            <option value="ALL">All fields</option>
+            <option value="overview">Overview</option>
+            <option value="features">Features</option>
+            <option value="specifications">Specifications</option>
+            <option value="image">Image</option>
+          </select>
+          <label className="text-xs font-semibold text-slate-500" htmlFor="reason-filter">Reason contains:</label>
+          <input
+            id="reason-filter"
+            value={reasonFilter}
+            onChange={(e) => onReasonFilterChange(e.target.value)}
+            placeholder="Search review reason"
+            className="w-40 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-xs"
           />
         </div>
 
@@ -95,7 +127,7 @@ export const ResultsTable: React.FC<ResultsTableProps> = ({
               <th className="px-3 py-3 w-12 text-center">Row</th>
               <th className="px-3 py-3 w-14 text-center">Image</th>
               <th className="px-3 py-3">MPN & Brand</th>
-              <th className="px-3 py-3 max-w-[220px]">Extracted Product Title</th>
+              <th className="px-3 py-3 max-w-[220px]">Source Product Title</th>
               <th className="px-3 py-3">Extracted Data Fields</th>
               <th className="px-3 py-3">Verified Sources</th>
               <th className="px-3 py-3">Status & Score</th>
@@ -158,9 +190,14 @@ export const ResultsTable: React.FC<ResultsTableProps> = ({
 
                     {/* Extracted Product Title */}
                     <td className="px-3 py-3 max-w-[220px]">
-                      <span className="font-medium text-slate-800 line-clamp-2 text-xs" title={res.product_name || res.title}>
-                        {res.product_name || res.title || <span className="text-slate-400 italic">None</span>}
+                      <span className="font-medium text-slate-800 line-clamp-2 text-xs" title={res.product_name}>
+                        {res.product_name || <span className="text-slate-400 italic">Not found on source page</span>}
                       </span>
+                      {res.title && (
+                        <span className="text-[10px] text-slate-400 block line-clamp-1 mt-0.5" title={res.title}>
+                          Catalog: {res.title}
+                        </span>
+                      )}
                       {res.overview && (
                         <span className="text-[10px] text-slate-400 block line-clamp-1 mt-0.5" title={res.overview}>
                           {res.overview}

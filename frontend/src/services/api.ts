@@ -2,6 +2,8 @@ import {
   DashboardStats,
   HealthStatus,
   Job,
+  JobPreviewRequest,
+  JobPreviewResponse,
   JobStartRequest,
   ProductResult,
   ProductResultsPage,
@@ -53,6 +55,13 @@ export const api = {
     });
   },
 
+  previewJob: (req: JobPreviewRequest) =>
+    request<JobPreviewResponse>('/jobs/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    }),
+
   createJob: (req: JobStartRequest) =>
     request<Job>('/jobs', {
       method: 'POST',
@@ -90,13 +99,17 @@ export const api = {
     page: number = 1,
     pageSize: number = 25,
     status?: string,
-    search?: string
+    search?: string,
+    missingField?: string,
+    reason?: string
   ) => {
     const params = new URLSearchParams();
     params.set('page', String(page));
     params.set('page_size', String(pageSize));
     if (status && status !== 'ALL') params.set('status', status);
     if (search && search.trim()) params.set('search', search.trim());
+    if (missingField && missingField !== 'ALL') params.set('missing_field', missingField);
+    if (reason && reason.trim()) params.set('reason', reason.trim());
     return request<ProductResultsPage>(`/jobs/${jobId}/results?${params.toString()}`);
   },
 
@@ -106,4 +119,3 @@ export const api = {
   getDownloadUrl: (jobId: string, type: 'organized' | 'scraped' | 'review' = 'organized') =>
     `${API_BASE}/jobs/${jobId}/download?type=${type}`,
 };
-

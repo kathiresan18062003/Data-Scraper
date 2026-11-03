@@ -31,6 +31,7 @@ export const App: React.FC = () => {
   };
 
   useEffect(() => {
+    localStorage.removeItem('gemini_api_key');
     fetchHealth();
     const interval = setInterval(fetchHealth, 15000);
     return () => clearInterval(interval);
@@ -85,7 +86,6 @@ export const App: React.FC = () => {
         {currentPage === 'settings' && (
           <SettingsPage
             health={health}
-            onRefreshHealth={fetchHealth}
           />
         )}
 

@@ -3,6 +3,12 @@ export interface SpecificationItem {
   value: string;
 }
 
+export interface FieldEvidence {
+  source_url: string;
+  extraction_method: string;
+  snippet: string;
+}
+
 export interface ProductResult {
   id: number;
   job_id: string;
@@ -29,6 +35,7 @@ export interface ProductResult {
   rework_reason: string;
   google_search_url: string;
   extraction_method: 'deterministic' | 'gemini_enhanced';
+  field_evidence: Record<string, FieldEvidence>;
   created_at?: string;
   updated_at?: string;
 }
@@ -85,6 +92,41 @@ export interface UploadResponse {
   sheets: SheetInfo[];
 }
 
+export interface JobPreviewRequest {
+  file_token: string;
+  sheet_name: string;
+  column_mapping: Record<string, string>;
+  limit?: number | null;
+  start_row?: number | null;
+  end_row?: number | null;
+  sno_start?: number | null;
+  sno_end?: number | null;
+  exclude_rows?: number[];
+}
+
+export interface SearchQueryPreview {
+  tier: string;
+  query: string;
+}
+
+export interface ProductQueryPreview {
+  row: number;
+  mpn: string;
+  manufacturer: string;
+  queries: SearchQueryPreview[];
+}
+
+export interface JobPreviewResponse {
+  total_rows: number;
+  excluded_rows_count: number;
+  missing_identifier_rows: number[];
+  duplicate_rows: number[];
+  invalid_gtin_rows: number[];
+  missing_manufacturer_rows: number[];
+  existing_url_rows: number[];
+  query_preview: ProductQueryPreview[];
+}
+
 export interface JobStartRequest {
   file_token: string;
   sheet_name: string;
@@ -98,7 +140,7 @@ export interface JobStartRequest {
   retries: number;
   use_gemini: boolean;
   save_every: number;
-  gemini_api_key?: string | null;
+  exclude_rows?: number[];
 }
 
 export interface ProductResultsPage {
@@ -128,4 +170,3 @@ export interface HealthStatus {
   database_connected: boolean;
   version: string;
 }
-
