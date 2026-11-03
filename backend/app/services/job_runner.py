@@ -33,6 +33,40 @@ MAX_CANDIDATES = 6
 MAX_SOURCES = 3
 
 
+def _evidence_snippet(page_text: str, value: Any, method: str) -> str:
+    if isinstance(value, dict):
+        name, item_value = value.get("name"), value.get("value")
+        candidates = [str(part).strip() for part in (name, item_value) if part]
+    elif isinstance(value, (list, tuple)):
+        candidates = []
+        for part in value:
+            if isinstance(part, dict):
+                name, item_value = part.get("name"), part.get("value")
+                candidates.extend(str(item).strip() for item in (name, item_value) if item)
+            elif part:
+                candidates.append(str(part).strip())
+    else:
+        candidates = [str(value or "").strip()]
+    candidates = [candidate for candidate in candidates if candidate]
+    if not candidates:
+        return ""
+
+    normalized_text = " ".join((page_text or "").split())
+    snippets = []
+    for candidate in candidates:
+        normalized_value = " ".join(candidate.split())
+        start = normalized_text.casefold().find(normalized_value.casefold())
+        if start >= 0:
+            snippet = normalized_text[max(0, start - 80):start + min(len(normalized_value), 240)]
+            if snippet not in snippets:
+                snippets.append(snippet)
+    if snippets:
+        return " ... ".join(snippets)[:1000]
+    if method == "deterministic":
+        return " | ".join(candidates)[:240]
+    return ""
+
+
 class JobController:
     def __init__(self, job_id: str):
         self.job_id = job_id
@@ -82,7 +116,6 @@ def process_single_row(
     retries: int = 2,
     timeout: int | None = None,
     on_stage: Callable[[str, str], None] = lambda s, u="": None,
-    gemini_api_key: str | None = None,
 ) -> dict:
     mpn = (row.get("primary_mpn") or row.get("mpn1") or row.get("mpn") or "").strip()
     mfr = (row.get("mfr") or "Unknown").strip()
@@ -105,6 +138,7 @@ def process_single_row(
         "notes": [],
         "missing": ["overview", "features", "specifications", "image"],
         "extraction_method": "deterministic",
+        "field_evidence": {},
     }
 
     on_stage("Discover Sources", "")
@@ -131,17 +165,46 @@ def process_single_row(
 
         on_stage("Extract Data", url)
         parsed = scraper.parse(html, url)
+        deterministic_fields = {
+            "product_title": bool(parsed.get("product_title")),
+            "overview": bool(parsed.get("overview")),
+            "features": bool(parsed.get("features")),
+            "specifications": bool(parsed.get("specifications")),
+            "fitments": bool(parsed.get("fitments")),
+            "image": bool(parsed.get("image_urls")),
+        }
         gaps = not (parsed["overview"] and parsed["features"] and parsed["specifications"])
         extraction_method = "deterministic"
 
-        if use_gemini and gx.available(gemini_api_key) and gaps:
+        if use_gemini and gx.available() and gaps:
             on_stage("AI Interpretation (Gemini)", url)
-            gem_res = gx.extract(url, parsed["text"], api_key=gemini_api_key)
+            gem_res = gx.extract(url, parsed["text"])
             if gem_res:
-                parsed, extraction_method = gx.merge(parsed, gem_res)
+                parsed, extraction_method = gx.merge(parsed, gem_res, parsed["text"])
 
+        parsed["_field_methods"] = {
+            field: "deterministic" if deterministic_fields[field] else (
+                "gemini_enhanced" if parsed.get(source_field) else "deterministic"
+            )
+            for field, source_field in (
+                ("product_title", "product_title"),
+                ("overview", "overview"),
+                ("features", "features"),
+                ("specifications", "specifications"),
+                ("fitments", "fitments"),
+                ("image", "image_urls"),
+            )
+        }
         on_stage("Validate Product", url)
-        v = dv.validate(mpn, mfr, url, parsed, preferred_domains=(), mfr_domain=sd.mfr_domain(mfr))
+        v = dv.validate(
+            mpn,
+            mfr,
+            url,
+            parsed,
+            preferred_domains=(),
+            mfr_domain=sd.mfr_domain(mfr),
+            upc=row.get("upc", ""),
+        )
 
         if v["is_valid"]:
             valids.append((parsed, v, tier, url, extraction_method))
@@ -169,15 +232,10 @@ def process_single_row(
         parsed, v, tier, url, extraction_method = selected_candidate
         parsed = dict(parsed, image_urls=list(parsed["image_urls"]))
 
-        # Cross-enrich missing fields from other verified pages
-        pool = valids[1:] if valids else all_fetched[1:]
-        for key in ("overview", "features", "specifications", "fitments", "image_urls"):
-            if not parsed.get(key):
-                for p2, _, _, u2, _ in pool:
-                    if p2.get(key):
-                        parsed[key] = p2[key]
-                        v["notes"].append(f"{key} enriched from {u2}")
-                        break
+        field_sources = {
+            field: (url, parsed.get("_field_methods", {}).get(field, extraction_method), parsed.get("text", ""))
+            for field in ("product_title", "overview", "features", "specifications", "fitments", "image")
+        }
 
         missing = [
             k for k in ("overview", "features", "specifications", "image")
@@ -205,12 +263,31 @@ def process_single_row(
         if rejected_candidates:
             notes.append("Rejected candidates: " + "; ".join(rejected_candidates[:2]))
 
+        evidence_values = {
+            "product_title": parsed.get("product_title"),
+            "overview": parsed.get("overview"),
+            "features": parsed.get("features"),
+            "specifications": parsed.get("specifications"),
+            "fitments": parsed.get("fitments"),
+            "image": (parsed.get("image_urls") or [""])[0],
+        }
+        field_evidence = {}
+        for field, value in evidence_values.items():
+            if not value:
+                continue
+            source_url, method, page_text = field_sources[field]
+            field_evidence[field] = {
+                "source_url": source_url,
+                "extraction_method": method,
+                "snippet": _evidence_snippet(page_text, value, method),
+            }
+
         res.update({
             "status": status,
             "tier": tier,
             "score": v["score"],
             "confidence": v["confidence"],
-            "product_title": parsed["product_title"] or row.get("title", ""),
+            "product_title": parsed["product_title"] or "",
             "overview": parsed["overview"],
             "features": parsed["features"],
             "specifications": parsed["specifications"],
@@ -220,6 +297,7 @@ def process_single_row(
             "missing": missing,
             "reason": reason,
             "extraction_method": extraction_method,
+            "field_evidence": field_evidence,
         })
     else:
         if rejected_candidates:
@@ -270,10 +348,10 @@ def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
         end_row = cfg.get("end_row")
         sno_start = cfg.get("sno_start")
         sno_end = cfg.get("sno_end")
+        exclude_rows = set(cfg.get("exclude_rows") or [])
         timeout = cfg.get("timeout", 20)
         retries = cfg.get("retries", 2)
         use_gemini = cfg.get("use_gemini", True)
-        gemini_api_key = cfg.get("gemini_api_key") or ""
 
         if not src_path.exists():
             return False
@@ -289,6 +367,7 @@ def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
             end_row=end_row,
             sno_start=sno_start,
             sno_end=sno_end,
+            exclude_rows=exclude_rows,
         )
         wb.close()
 
@@ -344,6 +423,7 @@ def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
                     rework_reason=saved_item.get("reason", ""),
                     google_search_url=saved_item.get("google", ""),
                     extraction_method=saved_item.get("extraction_method", "deterministic"),
+                    field_evidence=json.dumps(saved_item.get("field_evidence") or {}),
                 )
                 db.add(reconstructed)
                 existing_results[r_idx] = reconstructed
@@ -429,7 +509,6 @@ def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
                 use_gemini=use_gemini,
                 retries=retries,
                 timeout=timeout,
-                gemini_api_key=gemini_api_key,
             )
         except Exception as e:
             res = {
@@ -505,6 +584,7 @@ def process_job_step(job_id: str, retry_failed_only: bool = False) -> bool:
         db_res.rework_reason = res.get("reason", "")
         db_res.google_search_url = res.get("google", "")
         db_res.extraction_method = res.get("extraction_method", "deterministic")
+        db_res.field_evidence = json.dumps(res.get("field_evidence") or {}, ensure_ascii=False)
 
         all_res = list(existing_results.values())
         job.processed_products = len(all_res)

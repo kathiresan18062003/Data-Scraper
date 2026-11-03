@@ -122,6 +122,41 @@ def get_alternative_mpns(mpn: str) -> list[str]:
     return alts
 
 
+def preview_queries(row: dict, max_queries: int = 5) -> list[dict[str, str]]:
+    """Return representative query templates without making network requests."""
+    mpn = (row.get("primary_mpn") or row.get("mpn1") or row.get("mpn") or "").strip()
+    mfr = (row.get("mfr") or "").strip()
+    upc = (row.get("upc") or "").strip()
+    direct_url = (row.get("url") or "").strip()
+    if not mpn:
+        return []
+
+    queries = []
+    if direct_url.startswith("http"):
+        queries.append({"tier": "EXISTING URL", "query": direct_url})
+    domain = mfr_domain(mfr)
+    if domain:
+        queries.append({"tier": "MANUFACTURER", "query": f'site:{domain} "{mpn}"'})
+    if mfr and mfr.lower() not in ("unknown", "n/a", "none"):
+        queries.append({"tier": "EXACT QUOTE", "query": f'"{mfr}" "{mpn}"'})
+    for alt in get_alternative_mpns(mpn):
+        queries.append({"tier": "ALT FORMAT", "query": f'"{mfr}" "{alt}"' if mfr else f'"{alt}"'})
+    queries.append({"tier": "WEB SEARCH", "query": f'"{mpn}"'})
+    if upc:
+        queries.append({"tier": "UPC SEARCH", "query": f'"{upc}"'})
+
+    unique_queries = []
+    seen = set()
+    for item in queries:
+        key = item["query"].casefold()
+        if key not in seen:
+            unique_queries.append(item)
+            seen.add(key)
+        if len(unique_queries) >= max_queries:
+            break
+    return unique_queries
+
+
 def candidates(row: dict, max_total: int = 6):
     """
     Yields (source_type, url) through multi-strategy discovery:

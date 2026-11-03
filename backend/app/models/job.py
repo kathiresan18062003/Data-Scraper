@@ -93,6 +93,7 @@ class ProductResult(Base):
     rework_reason = Column(Text, default="")
     google_search_url = Column(String(1000), default="")
     extraction_method = Column(String(50), default="deterministic")
+    field_evidence = Column(Text, default="{}")
 
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -134,7 +135,7 @@ class ProductResult(Base):
             "rework_reason": self.rework_reason,
             "google_search_url": self.google_search_url,
             "extraction_method": self.extraction_method,
+            "field_evidence": safe_json(self.field_evidence, {}),
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
-

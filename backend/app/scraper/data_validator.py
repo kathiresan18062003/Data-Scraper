@@ -31,7 +31,8 @@ def validate(
     url: str,
     parsed: dict,
     preferred_domains=(),
-    mfr_domain=None
+    mfr_domain=None,
+    upc: str = "",
 ) -> dict:
     notes = []
     score = 0
@@ -54,6 +55,7 @@ def validate(
     page_mpn_raw = (parsed.get("mpn") or "").strip()
     page_mpn = norm(page_mpn_raw)
     body = norm(parsed.get("text", ""))
+    raw_text = parsed.get("text", "") or ""
 
     # 2. Reject search / category listing pages unless exact MPN is in the path
     if NEG.search(url) and full not in norm(urlparse(url).path):
@@ -83,6 +85,27 @@ def validate(
         score += 20
         mpn_hit = True
         notes.append("MPN in body text")
+
+    if upc and parsed.get("upc"):
+        catalog_gtin = re.sub(r"\D", "", upc)
+        page_gtin = re.sub(r"\D", "", str(parsed["upc"]))
+        if catalog_gtin and catalog_gtin == page_gtin:
+            score += 25
+            notes.append("UPC/GTIN match")
+        elif catalog_gtin and page_gtin:
+            score -= 15
+            notes.append("UPC/GTIN mismatch")
+
+    if mpn:
+        compatibility_reference = re.search(
+            rf"(?:compatible\s+with|fits?|replacement\s+for|works\s+with)"
+            rf"[^\n.!?]{{0,100}}(?<![A-Za-z0-9]){re.escape(mpn)}(?![A-Za-z0-9])",
+            raw_text,
+            re.I,
+        )
+        if compatibility_reference:
+            score -= 45
+            notes.append("MPN appears in a compatibility reference")
 
     # 4. Variant / Model mismatch detection
     if page_mpn and full:

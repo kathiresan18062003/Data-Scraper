@@ -22,6 +22,41 @@ class UploadResponse(BaseModel):
     sheets: list[SheetInfo]
 
 
+class JobPreviewRequest(BaseModel):
+    file_token: str
+    sheet_name: str
+    column_mapping: dict[str, str]
+    limit: Optional[int] = Field(default=None, ge=1)
+    start_row: Optional[int] = Field(default=None, ge=1)
+    end_row: Optional[int] = Field(default=None, ge=1)
+    sno_start: Optional[int] = Field(default=None, ge=0)
+    sno_end: Optional[int] = Field(default=None, ge=0)
+    exclude_rows: list[int] = Field(default_factory=list)
+
+
+class SearchQueryPreview(BaseModel):
+    tier: str
+    query: str
+
+
+class ProductQueryPreview(BaseModel):
+    row: int
+    mpn: str
+    manufacturer: str
+    queries: list[SearchQueryPreview] = Field(default_factory=list)
+
+
+class JobPreviewResponse(BaseModel):
+    total_rows: int
+    excluded_rows_count: int = 0
+    missing_identifier_rows: list[int] = Field(default_factory=list)
+    duplicate_rows: list[int] = Field(default_factory=list)
+    invalid_gtin_rows: list[int] = Field(default_factory=list)
+    missing_manufacturer_rows: list[int] = Field(default_factory=list)
+    existing_url_rows: list[int] = Field(default_factory=list)
+    query_preview: list[ProductQueryPreview] = Field(default_factory=list)
+
+
 class JobStartRequest(BaseModel):
     file_token: str
     sheet_name: str
@@ -34,8 +69,8 @@ class JobStartRequest(BaseModel):
     timeout: int = Field(default=20, ge=5, le=120)
     retries: int = Field(default=2, ge=0, le=5)
     use_gemini: bool = Field(default=True)
-    gemini_api_key: Optional[str] = Field(default=None)
     save_every: int = Field(default=1, ge=1, le=100)
+    exclude_rows: list[int] = Field(default_factory=list)
 
 
 class JobResponse(BaseModel):
@@ -87,6 +122,7 @@ class ProductResultResponse(BaseModel):
     rework_reason: str = ""
     google_search_url: str = ""
     extraction_method: str = "deterministic"
+    field_evidence: dict[str, dict[str, str]] = Field(default_factory=dict)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
 
@@ -117,4 +153,3 @@ class HealthResponse(BaseModel):
     search_available: bool
     database_connected: bool
     version: str
-

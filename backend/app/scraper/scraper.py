@@ -18,6 +18,24 @@ UA = {
     )
 }
 BAD_IMG = re.compile(r"logo|icon|sprite|pixel|placeholder|spacer|blank|\.svg|\.gif", re.I)
+BOILERPLATE = re.compile(
+    r"hover over (?:the )?image to zoom|email (?:a friend|this product)|"
+    r"login to submit (?:a )?review|add to (?:cart|wishlist)|write a review|"
+    r"share (?:this )?(?:product|item)|^(?:price|stock|availability|quantity)\b|"
+    r"^(?:in stock|out of stock|available for shipping)\b",
+    re.I,
+)
+WIDGET_BLOCK = re.compile(
+    r"customer[-_ ]?reviews?|review[-_ ]?widget|rating[-_ ]?widget|"
+    r"social[-_ ]?(?:share|links?)|share[-_ ]?buttons?|add[-_ ]?to[-_ ]?cart|"
+    r"wishlist|cookie[-_ ]?(?:notice|banner)|newsletter|breadcrumb|"
+    r"related[-_ ]?products?|recently[-_ ]?viewed",
+    re.I,
+)
+
+
+def _is_boilerplate(text: str) -> bool:
+    return bool(BOILERPLATE.search(" ".join((text or "").split())))
 
 
 def fetch(url: str, timeout: int | None = None, retries: int = 2) -> str | None:
@@ -68,7 +86,7 @@ def _items(container_re, soup: BeautifulSoup, tag: str = "li") -> list[str]:
     for c in soup.find_all(attrs={"class": container_re}) + soup.find_all(attrs={"id": container_re}):
         for li in c.find_all(tag):
             t = " ".join(li.get_text(" ", strip=True).split())
-            if 3 < len(t) < 400 and t not in seen:
+            if 3 < len(t) < 400 and t not in seen and not _is_boilerplate(t):
                 seen.add(t)
                 res.append(t)
     return res
@@ -106,6 +124,11 @@ def parse(html: str, url: str) -> dict:
         meta_img = soup.find("meta", property=prop) or soup.find("meta", attrs={"name": prop})
         if meta_img and meta_img.get("content"):
             imgs.append(urljoin(url, meta_img["content"]))
+
+    for element in soup.find_all(["nav", "footer"]):
+        element.decompose()
+    for element in soup.find_all(attrs={"class": WIDGET_BLOCK}) + soup.find_all(attrs={"id": WIDGET_BLOCK}):
+        element.decompose()
 
     # Additional image tags in product galleries
     for img_tag in soup.find_all("img"):
@@ -169,7 +192,7 @@ def parse(html: str, url: str) -> dict:
         if len(cells) == 2 and cells[0] and cells[1]:
             k = cells[0].rstrip(":").strip()
             v = cells[1].strip()
-            if 2 <= len(k) <= 60 and 0 < len(v) <= 400 and k.lower() not in seen_specs:
+            if 2 <= len(k) <= 60 and 0 < len(v) <= 400 and k.lower() not in seen_specs and not _is_boilerplate(f"{k} {v}"):
                 if not re.search(r"search|cart|privacy|terms|cookie|copyright|login|account", k, re.I):
                     seen_specs.add(k.lower())
                     specs.append({"name": k, "value": v})
@@ -180,7 +203,7 @@ def parse(html: str, url: str) -> dict:
         if dd:
             k = dt.get_text(" ", strip=True).rstrip(":").strip()
             v = dd.get_text(" ", strip=True).strip()
-            if 2 <= len(k) <= 60 and 0 < len(v) <= 400 and k.lower() not in seen_specs:
+            if 2 <= len(k) <= 60 and 0 < len(v) <= 400 and k.lower() not in seen_specs and not _is_boilerplate(f"{k} {v}"):
                 seen_specs.add(k.lower())
                 specs.append({"name": k, "value": v})
 
@@ -191,7 +214,7 @@ def parse(html: str, url: str) -> dict:
         if len(labels) == 1 and len(values) == 1:
             k = labels[0].get_text(" ", strip=True).rstrip(":").strip()
             v = values[0].get_text(" ", strip=True).strip()
-            if 2 <= len(k) <= 60 and 0 < len(v) <= 400 and k.lower() not in seen_specs:
+            if 2 <= len(k) <= 60 and 0 < len(v) <= 400 and k.lower() not in seen_specs and not _is_boilerplate(f"{k} {v}"):
                 seen_specs.add(k.lower())
                 specs.append({"name": k, "value": v})
 
@@ -201,7 +224,7 @@ def parse(html: str, url: str) -> dict:
         for container in soup.find_all(attrs={"class": re.compile(r"description|product-.*desc|product-info|product-detail|overview|content", re.I)}) + soup.find_all(attrs={"id": re.compile(r"description|product-.*desc|product-info|product-detail|overview|content", re.I)}):
             for li in container.find_all("li"):
                 txt = " ".join(li.get_text(" ", strip=True).split())
-                if 5 <= len(txt) <= 400 and txt not in features:
+                if 5 <= len(txt) <= 400 and txt not in features and not _is_boilerplate(txt):
                     features.append(txt)
             if len(features) >= 3:
                 break
@@ -209,7 +232,7 @@ def parse(html: str, url: str) -> dict:
     if not features:
         for li in soup.find_all("li"):
             txt = " ".join(li.get_text(" ", strip=True).split())
-            if 15 <= len(txt) <= 300 and txt not in features:
+            if 15 <= len(txt) <= 300 and txt not in features and not _is_boilerplate(txt):
                 if not re.search(r"search|cart|privacy|terms|cookie|copyright|login|account|sign in|home|contact|menu", txt, re.I):
                     features.append(txt)
 
@@ -221,12 +244,16 @@ def parse(html: str, url: str) -> dict:
             if any(w in t_txt.lower() for w in ("compatible vehicle", "spindle type", "applications", "fits vehicle")):
                 for tr in t.find_all("tr"):
                     row_txt = " ".join(tr.get_text(" ", strip=True).split())
-                    if 5 <= len(row_txt) <= 250 and row_txt not in fitments:
+                    if 5 <= len(row_txt) <= 250 and row_txt not in fitments and not _is_boilerplate(row_txt):
                         fitments.append(row_txt)
 
     return {
         "product_title": title or "",
         "mpn": str(prod.get("mpn") or prod.get("sku") or ""),
+        "upc": str(
+            prod.get("gtin12") or prod.get("gtin13") or prod.get("gtin14")
+            or prod.get("gtin8") or prod.get("upc") or ""
+        ),
         "manufacturer": brand or "",
         "image_urls": [i for i in dict.fromkeys(imgs) if valid_image(i)],
         "overview": overview,

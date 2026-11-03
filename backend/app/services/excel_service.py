@@ -33,7 +33,7 @@ COLS = [
     ("Row", 6), ("MPN", 18), ("Manufacturer", 18), ("Product Name", 36), ("Status", 11), ("Confidence", 12),
     ("Image", 12), ("Source 1", 38), ("Source 2", 38), ("Source 3", 38), ("Overview", 60),
     ("Features", 60), ("Specifications", 60), ("Fitments", 45), ("Missing / Review Reason", 32),
-    ("Google Search Link", 38)
+    ("Google Search Link", 38), ("Extraction Method", 20), ("Field Evidence", 60)
 ]
 
 _EXPORT_LOCK = threading.Lock()
@@ -106,12 +106,23 @@ def sheet_names(path: Path) -> list[str]:
     return names
 
 
+def _header_row(ws: openpyxl.worksheet.worksheet.Worksheet) -> int:
+    populated_counts = {
+        row_idx: sum(1 for c in ws[row_idx] if c.value is not None and str(c.value).strip())
+        for row_idx in (1, 2)
+    }
+    if populated_counts[2] > populated_counts[1]:
+        return 2
+    return 1
+
+
 def get_headers(ws: openpyxl.worksheet.worksheet.Worksheet) -> dict[str, int]:
-    for row_idx in (1, 2):
-        row_cells = [c for c in ws[row_idx] if c.value is not None and str(c.value).strip()]
-        if row_cells:
-            return {str(c.value).strip().lower(): c.column for c in row_cells}
-    return {}
+    row_idx = _header_row(ws)
+    return {
+        str(c.value).strip().lower(): c.column
+        for c in ws[row_idx]
+        if c.value is not None and str(c.value).strip()
+    }
 
 
 def detect_columns(ws: openpyxl.worksheet.worksheet.Worksheet) -> dict[str, str | None]:
@@ -135,9 +146,8 @@ def get_sheet_info(file_path: Path) -> list[SheetInfo]:
     sheets = []
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
-        headers_list = [str(c.value).strip() for c in ws[1] if c.value is not None and str(c.value).strip()]
-        if not headers_list and ws.max_row >= 2:
-            headers_list = [str(c.value).strip() for c in ws[2] if c.value is not None and str(c.value).strip()]
+        header_row = _header_row(ws)
+        headers_list = [str(c.value).strip() for c in ws[header_row] if c.value is not None and str(c.value).strip()]
         detected = detect_columns(ws)
 
         preview_rows = []
@@ -146,7 +156,7 @@ def get_sheet_info(file_path: Path) -> list[SheetInfo]:
 
         sheets.append(SheetInfo(
             name=sheet_name,
-            row_count=max(ws.max_row - 1, 0),
+            row_count=max(ws.max_row - header_row, 0),
             column_count=ws.max_column or 0,
             detected_columns=detected,
             headers=headers_list,
@@ -164,6 +174,9 @@ def read_rows(
     end_row: int | None = None,
     sno_start: int | None = None,
     sno_end: int | None = None,
+    include_missing_mpn: bool = False,
+    deduplicate: bool = True,
+    exclude_rows: set[int] | None = None,
 ) -> list[dict]:
     h = get_headers(ws)
 
@@ -183,10 +196,13 @@ def read_rows(
         return str(cell_val).strip() if cell_val is not None else ""
 
     rows = []
-    min_r = max(start_row, 2) if start_row else 2
+    first_data_row = _header_row(ws) + 1
+    min_r = max(start_row, first_data_row) if start_row else first_data_row
     max_r = min(end_row, ws.max_row) if end_row else ws.max_row
 
     for r in range(min_r, max_r + 1):
+        if exclude_rows and r in exclude_rows:
+            continue
         sno = val(r, "sno") or str(r - 1)
         mpn1 = val(r, "mpn1")
         mpn = val(r, "mpn")
@@ -209,7 +225,8 @@ def read_rows(
             except (ValueError, TypeError):
                 pass
 
-        if primary_mpn:
+        has_row_data = any((sno, mpn1, mpn, mfr, title, upc, url))
+        if primary_mpn or (include_missing_mpn and has_row_data):
             rows.append({
                 "row": r,
                 "sno": sno,
@@ -222,6 +239,9 @@ def read_rows(
                 "url": url,
             })
 
+    if not deduplicate:
+        return rows[:limit] if limit else rows
+
     seen = set()
     uniq = []
     for x in rows:
@@ -233,19 +253,54 @@ def read_rows(
     return uniq[:limit] if limit else uniq
 
 
+def valid_gtin(value: str) -> bool:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return True
+
+    digits = re.sub(r"[\s-]", "", raw_value)
+    if not digits.isdigit() or len(digits) not in (8, 12, 13, 14):
+        return False
+
+    body = digits[:-1]
+    weighted_sum = sum(
+        int(digit) * (3 if offset % 2 == 0 else 1)
+        for offset, digit in enumerate(reversed(body))
+    )
+    expected_check_digit = (10 - weighted_sum % 10) % 10
+    return expected_check_digit == int(digits[-1])
+
+
 def _col(ws, name: str) -> int:
     h = get_headers(ws)
     if name.lower() in h:
         return h[name.lower()]
     c = ws.max_column + 1
-    ws.cell(1, c, name)
+    ws.cell(_header_row(ws), c, name)
     return c
 
 
-def write_result_to_worksheet(ws, row_idx: int, res: dict):
+def _new_scraped_column_name(ws, name: str, reserved: set[str]) -> str:
+    headers = get_headers(ws)
+    base = f"Scraped - {name}"
+    candidate = base
+    suffix = 2
+    while candidate.lower() in headers or candidate.lower() in reserved:
+        candidate = f"{base} ({suffix})"
+        suffix += 1
+    reserved.add(candidate.lower())
+    return candidate
+
+
+def write_result_to_worksheet(ws, row_idx: int, res: dict, output_columns: dict[str, str] | None = None):
+    output_columns = output_columns if output_columns is not None else {}
+    reserved_columns = {column.lower() for column in output_columns.values()}
+
     def put(name: str, v):
         if v not in (None, ""):
-            ws.cell(row_idx, _col(ws, name), v)
+            if name not in output_columns:
+                output_columns[name] = _new_scraped_column_name(ws, name, reserved_columns)
+            ws.cell(row_idx, _col(ws, output_columns[name]), v)
 
     put("Image Link", res.get("image") or res.get("image_url"))
     sources = res.get("sources") or res.get("source_urls") or []
@@ -276,6 +331,10 @@ def write_result_to_worksheet(ws, row_idx: int, res: dict):
     put("Completed", "Y" if ok else "N")
     put("DataNotAvailable", "N" if ok else "Y")
     put("reworkreason", res.get("reason", "") or res.get("rework_reason", "") if not ok else "")
+    put("Extraction Method", res.get("extraction_method", "deterministic"))
+    field_evidence = res.get("field_evidence") or {}
+    if field_evidence:
+        put("Field Evidence", json.dumps(field_evidence, ensure_ascii=False))
 
 
 def export_organized_workbook(rows: list[dict], results: dict[int, dict], target_path: Path):
@@ -296,7 +355,7 @@ def export_organized_workbook(rows: list[dict], results: dict[int, dict], target
         if not x:
             ws.append([
                 row_id, r["mpn"], r["mfr"], "", "PENDING", "",
-                "", "", "", "", "", "", "", "", "Pending processing", glink
+                "", "", "", "", "", "", "", "", "Pending processing", glink, "", ""
             ])
             i = ws.max_row
             if glink:
@@ -320,7 +379,8 @@ def export_organized_workbook(rows: list[dict], results: dict[int, dict], target
             "\n".join(f"• {f}" for f in features)[:32000],
             "\n".join(f'{s.get("name")}: {s.get("value")}' for s in specs)[:32000],
             "\n".join(fitments)[:32000],
-            reason, glink
+            reason, glink, x.get("extraction_method", "deterministic"),
+            json.dumps(x.get("field_evidence") or {}, ensure_ascii=False)
         ])
         i = ws.max_row
         if img:
@@ -378,7 +438,7 @@ def export_review_workbook(rows: list[dict], results: dict[int, dict], target_pa
     d = rp.create_sheet("Row Audit")
     d.append([
         "Row", "MPN", "Manufacturer", "Tier", "Selected URL", "Score", "Confidence", "Status",
-        "Evidence", "Missing / Reason", "Recommended action"
+        "Evidence", "Missing / Reason", "Recommended action", "Field Evidence"
     ])
 
     seen_rows = set()
@@ -403,7 +463,8 @@ def export_review_workbook(rows: list[dict], results: dict[int, dict], target_pa
 
         d.append([
             row_id, r["mpn"], r["mfr"], x.get("tier"), sources[0] if sources else "", x.get("score"),
-            x.get("confidence"), x.get("status"), "; ".join(notes), reason, act
+            x.get("confidence"), x.get("status"), "; ".join(notes), reason, act,
+            json.dumps(x.get("field_evidence") or {}, ensure_ascii=False)
         ])
 
     _safe_save_wb(rp, target_path)
@@ -412,21 +473,24 @@ def export_review_workbook(rows: list[dict], results: dict[int, dict], target_pa
 def export_all(src_path: Path, sheet: str, rows: list[dict], results: dict[int, dict], job_id: str | None = None) -> dict[str, Path]:
     with _EXPORT_LOCK:
         src_path = Path(src_path)
-        wb = openpyxl.load_workbook(src_path)
+        keep_vba = src_path.suffix.lower() == ".xlsm"
+        wb = openpyxl.load_workbook(src_path, keep_vba=keep_vba)
         ws = wb[sheet]
 
         seen_rows = set()
+        scraped_columns: dict[str, str] = {}
         for r in rows:
             row_id = r["row"]
             if row_id in seen_rows:
                 continue
             seen_rows.add(row_id)
             if row_id in results:
-                write_result_to_worksheet(ws, row_id, results[row_id])
+                write_result_to_worksheet(ws, row_id, results[row_id], scraped_columns)
 
         # Paths
         prefix = f"{job_id}_" if job_id else ""
-        out_scraped = OUTPUT_DIR / f"{prefix}Data_collection_scraped.xlsx"
+        scraped_extension = ".xlsm" if keep_vba else ".xlsx"
+        out_scraped = OUTPUT_DIR / f"{prefix}Data_collection_scraped{scraped_extension}"
         out_organized = OUTPUT_DIR / f"{prefix}Final_Organized_Output.xlsx"
         out_review = OUTPUT_DIR / f"{prefix}Scrape_Review_Report.xlsx"
 
@@ -437,7 +501,7 @@ def export_all(src_path: Path, sheet: str, rows: list[dict], results: dict[int, 
         # Also update root output files for quick convenience
         if job_id:
             try:
-                _safe_save_wb(wb, OUTPUT_DIR / "Data_collection_scraped.xlsx")
+                _safe_save_wb(wb, OUTPUT_DIR / f"Data_collection_scraped{scraped_extension}")
                 export_organized_workbook(rows, results, OUTPUT_DIR / "Final_Organized_Output.xlsx")
                 export_review_workbook(rows, results, OUTPUT_DIR / "Scrape_Review_Report.xlsx")
             except Exception:

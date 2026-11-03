@@ -49,7 +49,7 @@ product_data_scraper_dashboard/
 1. **Deterministic HTML + AI Hybrid Extraction Engine:**
    - Multi-tier search: checks existing Excel URLs, manufacturer domains, and DuckDuckGo search queries.
    - Extracts Schema.org JSON-LD, OpenGraph images, meta descriptions, specification tables, and bullet features deterministically.
-   - Optional Google Gemini AI synthesis fills missing specifications and overviews without hallucinating unverified links or specs.
+   - Optional Google Gemini AI extraction fills gaps only when the returned value is present in the fetched page text.
    - Rigorous identity validation scoring (minimum 35 points with MPN signals) prevents false-positive product matches.
 
 2. **Persistent Jobs & Asynchronous Background Runner:**
@@ -59,8 +59,9 @@ product_data_scraper_dashboard/
 3. **Simultaneous Incremental Excel Saving:**
    - Automatically initializes and updates three Excel files incrementally as scraping runs:
      1. `Final_Organized_Output.xlsx`: Formatted, styled table with hyperlinks and status colors.
-     2. `Data_collection_scraped.xlsx`: In-place enrichment of the original uploaded catalog sheet.
+     2. `Data_collection_scraped.xlsx`: A copy of the uploaded workbook with scraped fields in new `Scraped - ...` columns; existing catalog cells are preserved.
      3. `Scrape_Review_Report.xlsx`: Comprehensive audit report with failure reasons and Google search fallback links.
+   - Product results include field-level source URLs, extraction methods, and evidence snippets where available.
 
 4. **Modern React Dashboard UI:**
    - Real-time progress bar with live active product stage and URL monitor.
@@ -99,6 +100,8 @@ DATABASE_URL=sqlite:///./data/scraper.db
 FRONTEND_ORIGIN=http://localhost:5173,http://127.0.0.1:5173
 ```
 
+Keep `GEMINI_API_KEY` on the backend in `.env`; do not enter it into the browser or commit the `.env` file. Gemini is optional, and the dashboard uses deterministic extraction when no backend key is configured.
+
 ---
 
 ### 2. Backend Installation
@@ -111,6 +114,8 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 ```
+
+The backend creates SQLite tables on startup and adds the field-evidence column to existing databases when needed.
 
 ---
 
@@ -157,6 +162,10 @@ npm run dev
 
 - **Frontend Dashboard:** `http://127.0.0.1:5173`
 
+### Optional Docker backend
+
+From the project root, run `docker compose up --build backend`. Compose publishes the backend on host port **8001** and forwards it to container port **8000**. This keeps the host-facing API port consistent with the local Vite proxy and the two-terminal setup.
+
 ---
 
 ## Running Automated Tests
@@ -165,10 +174,8 @@ Run the full automated test suite (API endpoints + extraction & Excel persistenc
 
 ```powershell
 cd "C:\Users\Velmurugan T\Downloads\product_data_scraper_dashboard"
-.\.venv\Scripts\python.exe -m pytest tests/test_api.py test_smoke.py -v
+.\.venv\Scripts\python.exe -m pytest tests\test_app_excel_evidence.py tests\test_api.py test_smoke.py -v
 ```
-
-All 21 unit and integration tests will execute.
 
 ---
 
@@ -179,6 +186,7 @@ All 21 unit and integration tests will execute.
 | `GET` | `/api/health` | Backend readiness, database status, Gemini API status |
 | `GET` | `/api/dashboard` | Aggregated metrics, total products, recent jobs |
 | `POST` | `/api/jobs/upload` | Upload `.xlsx` catalog, parse sheets & headers |
+| `POST` | `/api/jobs/preview` | Validate selected rows and preview search templates without network searches |
 | `POST` | `/api/jobs` | Create and start a background scraping job |
 | `GET` | `/api/jobs` | List all historical scraping jobs |
 | `GET` | `/api/jobs/{job_id}` | Detailed job status, progress, and logs |
@@ -191,4 +199,3 @@ All 21 unit and integration tests will execute.
 | `GET` | `/api/jobs/{job_id}/results/{result_id}` | Detailed product view with specs & evidence |
 | `GET` | `/api/jobs/{job_id}/download` | Download Excel output (`type=organized`, `scraped`, `review`) |
 | `GET` | `/api/jobs/{job_id}/events` | Server-Sent Events (SSE) for live streaming progress |
-

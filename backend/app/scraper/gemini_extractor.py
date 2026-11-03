@@ -1,4 +1,4 @@
-"""Gemini structured extraction with local MD5 caching. Fills gaps deterministic parser missed."""
+"""Grounded Gemini extraction with page-content caching. Fills gaps deterministic parsing missed."""
 import hashlib
 import json
 import logging
@@ -28,24 +28,23 @@ class GeminiProductExtraction(BaseModel):
 
 PROMPT = (
     "Extract product data ONLY from the verified page text below. Never invent or assume outside knowledge.\n"
+    "Copy values verbatim; do not normalize, infer, summarize, or add outside knowledge.\n"
     "Only extract specifications and features explicitly stated in the text.\n"
     "Leave fields empty and list them in missing_fields if absent.\n\n"
     "URL: {url}\n\n{text}"
 )
 
 
-def available(api_key: str | None = None) -> bool:
-    if api_key and api_key.strip():
-        return True
+def available() -> bool:
     return is_gemini_available()
 
 
-def extract(url: str, text: str, api_key: str | None = None) -> dict | None:
-    active_key = (api_key or "").strip() or GEMINI_API_KEY
+def extract(url: str, text: str) -> dict | None:
+    active_key = GEMINI_API_KEY
     if not active_key:
         return None
 
-    cache_key = hashlib.md5((url + GEMINI_MODEL + active_key[:8]).encode()).hexdigest()
+    cache_key = hashlib.sha256(f"{url}\0{GEMINI_MODEL}\0{text}".encode()).hexdigest()
     cache_file = CACHE_DIR / f"gemini_{cache_key}.json"
     if cache_file.exists():
         try:
@@ -81,20 +80,39 @@ def extract(url: str, text: str, api_key: str | None = None) -> dict | None:
         return None
 
 
-def merge(parsed: dict, gem: dict | None) -> tuple[dict, str]:
-    """Deterministic values win; Gemini only fills gaps."""
+def _grounded_text(value: str, page_text: str) -> bool:
+    normalized_value = " ".join((value or "").split()).casefold()
+    normalized_page = " ".join((page_text or "").split()).casefold()
+    return len(normalized_value) >= 2 and normalized_value in normalized_page
+
+
+def _grounded_values(key: str, value, page_text: str):
+    if key == "specifications":
+        return [
+            item for item in value or []
+            if item.get("name") and item.get("value")
+            and _grounded_text(item["name"], page_text)
+            and _grounded_text(item["value"], page_text)
+        ]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str) and _grounded_text(item, page_text)]
+    if isinstance(value, str) and _grounded_text(value, page_text):
+        return value
+    return None
+
+
+def merge(parsed: dict, gem: dict | None, page_text: str = "") -> tuple[dict, str]:
+    """Keep deterministic values and use Gemini only for text grounded in the page."""
     if not gem:
         return parsed, "deterministic"
     out = dict(parsed)
     used_gemini = False
-    for k in ("product_title", "mpn", "manufacturer", "overview"):
+    for k in ("product_title", "mpn", "manufacturer", "overview", "features", "specifications", "fitments", "image_urls"):
         if not out.get(k) and gem.get(k):
-            out[k] = gem[k]
-            used_gemini = True
-    for k in ("image_urls", "features", "specifications", "fitments"):
-        if not out.get(k) and gem.get(k):
-            out[k] = gem[k]
-            used_gemini = True
+            grounded_value = _grounded_values(k, gem[k], page_text)
+            if grounded_value:
+                out[k] = grounded_value
+                used_gemini = True
     out["missing_fields"] = gem.get("missing_fields", [])
     method = "gemini_enhanced" if used_gemini else "deterministic"
     return out, method

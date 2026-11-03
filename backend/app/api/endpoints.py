@@ -25,6 +25,8 @@ from backend.app.schemas.job import (
     DashboardStatsResponse,
     HealthResponse,
     JobListResponse,
+    JobPreviewRequest,
+    JobPreviewResponse,
     JobResponse,
     JobStartRequest,
     ProductResultResponse,
@@ -180,6 +182,101 @@ async def upload_catalog_excel(file: UploadFile = File(...)):
     )
 
 
+@router.post("/jobs/preview", response_model=JobPreviewResponse)
+def preview_catalog_job(req: JobPreviewRequest):
+    matching = list(UPLOAD_DIR.glob(f"{req.file_token}.*"))
+    if not matching:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Uploaded file not found or expired.",
+        )
+
+    file_path = matching[0]
+    try:
+        workbook = openpyxl.load_workbook(file_path, data_only=True)
+        if req.sheet_name not in workbook.sheetnames:
+            raise HTTPException(status_code=400, detail="Worksheet not found in uploaded workbook.")
+        worksheet = workbook[req.sheet_name]
+        scope_rows = excel_service.read_rows(
+            worksheet,
+            req.column_mapping,
+            start_row=req.start_row,
+            end_row=req.end_row,
+            sno_start=req.sno_start,
+            sno_end=req.sno_end,
+            include_missing_mpn=True,
+            deduplicate=False,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not preview worksheet: {exc}") from exc
+    finally:
+        if "workbook" in locals():
+            workbook.close()
+
+    excluded_rows = set(req.exclude_rows)
+    excluded_rows_count = sum(1 for row in scope_rows if row["row"] in excluded_rows)
+    active_scope_rows = [row for row in scope_rows if row["row"] not in excluded_rows]
+    missing_identifier_rows = [row["row"] for row in active_scope_rows if not row["mpn"]]
+    missing_manufacturer_rows = [
+        row["row"] for row in active_scope_rows if not row["mfr"] or row["mfr"].casefold() == "unknown"
+    ]
+    invalid_gtin_rows = [
+        row["row"] for row in active_scope_rows if row["upc"] and not excel_service.valid_gtin(row["upc"])
+    ]
+    existing_url_rows = [row["row"] for row in active_scope_rows if row["url"].startswith("http")]
+
+    seen_identifiers = set()
+    duplicate_rows = []
+    for row in active_scope_rows:
+        if not row["mpn"]:
+            continue
+        key = (row["mpn"].casefold(), row["mfr"].casefold())
+        if key in seen_identifiers:
+            duplicate_rows.append(row["row"])
+        else:
+            seen_identifiers.add(key)
+
+    rows = []
+    selected_identifiers = set()
+    for row in active_scope_rows:
+        if not row["mpn"]:
+            continue
+        key = (row["mpn"].casefold(), row["mfr"].casefold())
+        if key in selected_identifiers:
+            continue
+        if req.limit and len(rows) >= req.limit:
+            break
+        selected_identifiers.add(key)
+        rows.append(row)
+
+    from backend.app.scraper.source_discovery import preview_queries
+
+    query_preview = []
+    for row in rows:
+        if row["mpn"]:
+            query_preview.append({
+                "row": row["row"],
+                "mpn": row["mpn"],
+                "manufacturer": row["mfr"],
+                "queries": preview_queries(row),
+            })
+        if len(query_preview) >= 5:
+            break
+
+    return JobPreviewResponse(
+        total_rows=len(rows),
+        excluded_rows_count=excluded_rows_count,
+        missing_identifier_rows=missing_identifier_rows,
+        duplicate_rows=duplicate_rows,
+        invalid_gtin_rows=invalid_gtin_rows,
+        missing_manufacturer_rows=missing_manufacturer_rows,
+        existing_url_rows=existing_url_rows,
+        query_preview=query_preview,
+    )
+
+
 @router.post("/jobs", response_model=JobResponse)
 def create_and_start_job(req: JobStartRequest, db: Session = Depends(get_db)):
     matching = list(UPLOAD_DIR.glob(f"{req.file_token}.*"))
@@ -207,6 +304,7 @@ def create_and_start_job(req: JobStartRequest, db: Session = Depends(get_db)):
             end_row=req.end_row,
             sno_start=req.sno_start,
             sno_end=req.sno_end,
+            exclude_rows=set(req.exclude_rows),
         )
         wb.close()
         total_products = len(rows)
@@ -245,8 +343,8 @@ def create_and_start_job(req: JobStartRequest, db: Session = Depends(get_db)):
             "timeout": req.timeout,
             "retries": req.retries,
             "use_gemini": req.use_gemini,
-            "gemini_api_key": req.gemini_api_key or "",
             "save_every": req.save_every,
+            "exclude_rows": req.exclude_rows,
         }),
         logs=json.dumps([f"[{datetime.now().strftime('%H:%M:%S')}] Started scraping job for {total_products} products."]),
     )
@@ -354,6 +452,8 @@ def get_job_results(
     page_size: int = Query(default=25, ge=5, le=100),
     status: Optional[str] = None,
     search: Optional[str] = None,
+    missing_field: Optional[str] = None,
+    reason: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
     _get_job_or_404(job_id, db)
@@ -370,6 +470,15 @@ def get_job_results(
             | (ProductResult.product_name.ilike(s))
             | (ProductResult.title.ilike(s))
         )
+
+    if missing_field:
+        allowed_fields = {"overview", "features", "specifications", "image"}
+        if missing_field not in allowed_fields:
+            raise HTTPException(status_code=400, detail="Unsupported missing-field filter.")
+        query = query.filter(ProductResult.missing_fields.ilike(f'%"{missing_field}"%'))
+
+    if reason and reason.strip():
+        query = query.filter(ProductResult.rework_reason.ilike(f"%{reason.strip()}%"))
 
     total = query.count()
     items = (
@@ -420,8 +529,12 @@ def download_excel(
             target_file = Path(job.output_scraped_path)
         elif (OUTPUT_DIR / f"{job_id}_Data_collection_scraped.xlsx").exists():
             target_file = OUTPUT_DIR / f"{job_id}_Data_collection_scraped.xlsx"
+        elif (OUTPUT_DIR / f"{job_id}_Data_collection_scraped.xlsm").exists():
+            target_file = OUTPUT_DIR / f"{job_id}_Data_collection_scraped.xlsm"
         elif (OUTPUT_DIR / "Data_collection_scraped.xlsx").exists():
             target_file = OUTPUT_DIR / "Data_collection_scraped.xlsx"
+        elif (OUTPUT_DIR / "Data_collection_scraped.xlsm").exists():
+            target_file = OUTPUT_DIR / "Data_collection_scraped.xlsm"
     elif type == "review":
         if job.output_review_path and Path(job.output_review_path).exists():
             target_file = Path(job.output_review_path)
@@ -436,11 +549,18 @@ def download_excel(
             detail="The requested Excel file has not been generated yet. Please start or wait for scraping to begin.",
         )
 
-    filename = f"{type}_{job.original_filename if job.original_filename.endswith('.xlsx') else job.original_filename + '.xlsx'}"
+    original_name = job.original_filename
+    if not original_name.lower().endswith((".xlsx", ".xlsm")):
+        original_name += ".xlsx"
+    filename = f"{type}_{original_name}"
     return FileResponse(
         path=target_file,
         filename=filename,
-        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        media_type=(
+            "application/vnd.ms-excel.sheet.macroEnabled.12"
+            if target_file.suffix.lower() == ".xlsm"
+            else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        ),
     )
 
 
@@ -510,4 +630,3 @@ async def job_events(job_id: str):
             await asyncio.sleep(1.0)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
-
