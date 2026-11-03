@@ -10,3 +10,5 @@ python-dotenv>=1.0.0
 python-multipart>=0.0.9
 google-genai>=1.0.0
 aiofiles>=23.2.1
+ddgs>=9.0.0
+psycopg[binary]>=3.1

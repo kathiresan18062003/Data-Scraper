@@ -70,17 +70,17 @@ class ProductResult(Base):
 
     mpn = Column(String(100), nullable=False, index=True)
     manufacturer = Column(String(150), nullable=False, index=True)
-    title = Column(String(300), default="")
-    product_name = Column(String(300), default="")
+    title = Column(Text, default="")
+    product_name = Column(Text, default="")
 
     status = Column(String(50), default="PENDING", index=True)
     confidence = Column(String(50), default="REJECTED")
     tier = Column(String(100), default="MANUAL REVIEW")
     score = Column(Integer, default=0)
 
-    image_url = Column(String(1000), default="")
+    image_url = Column(Text, default="")
     image_urls = Column(Text, default="[]")
-    source_url = Column(String(1000), default="")
+    source_url = Column(Text, default="")
     source_urls = Column(Text, default="[]")
     data_source_urls = Column(Text, default="[]")
 
@@ -91,7 +91,7 @@ class ProductResult(Base):
     missing_fields = Column(Text, default="[]")
     validation_notes = Column(Text, default="[]")
     rework_reason = Column(Text, default="")
-    google_search_url = Column(String(1000), default="")
+    google_search_url = Column(Text, default="")
     extraction_method = Column(String(50), default="deterministic")
     field_evidence = Column(Text, default="{}")
 
